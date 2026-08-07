@@ -88,7 +88,7 @@ https://${netfyr_ip} {
     reverse_proxy 127.0.0.1:8080
 }
 EOF
-  if ! caddy validate --config "$caddy_tmp"; then
+  if ! caddy validate --adapter caddyfile --config "$caddy_tmp"; then
     rm -f "$caddy_tmp" "$caddy_backup"
     echo "Caddy configuration validation failed; existing configuration unchanged" >&2
     exit 1

@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.0-2f855a" alt="Version 1.0.0">
+  <img src="https://img.shields.io/badge/version-1.0.1-2f855a" alt="Version 1.0.1">
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0">
   <img src="https://img.shields.io/badge/platform-Debian%2013-lightgrey" alt="Platform: Debian 13">
   <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20Axum-orange" alt="Built with Rust and Axum">
@@ -52,10 +52,10 @@ When the installer has been accepted upstream, the canonical command will use
   script=$(mktemp)
   trap 'rm -f "$script"' EXIT
   curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-    https://raw.githubusercontent.com/mattiaskallman/netfyr-server/v1.0.0/community-scripts/ct/netfyr.sh \
+    https://raw.githubusercontent.com/mattiaskallman/netfyr-server/v1.0.1/community-scripts/ct/netfyr.sh \
     -o "$script"
   printf '%s  %s\n' \
-    36918923838dd35e4693ce2137f5f8770e37518076c214dece3f0618fab3c059 \
+    7349f1b2c1f78a0b1e9c44b4e8426d937671a03ddbadad45ed7c6635efa5a489 \
     "$script" | sha256sum -c -
   bash "$script"
 )

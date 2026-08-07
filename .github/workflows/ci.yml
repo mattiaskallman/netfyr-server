@@ -29,7 +29,9 @@ jobs:
         run: |
           ./scripts/test-release-download.sh
           ./scripts/test-update-transaction.sh
+          ./scripts/test-community-installer-regressions.sh
       - name: Verify release archive
         run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           ./scripts/build-release.sh
-          ./scripts/verify-release.sh dist/netfyr-server-v1.0.0-linux-amd64.tar.gz
+          ./scripts/verify-release.sh "dist/netfyr-server-v${version}-linux-amd64.tar.gz"
