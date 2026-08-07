@@ -1,0 +1,46 @@
+# NetFyr Server — systemd-enhet.
+#
+# Härdningen följer principen att tjänsten bara behöver:
+#   * läsa /etc/netfyr
+#   * läsa och skriva /var/lib/netfyr
+#   * skicka ICMP-ping och utgående nätverkstrafik (kanalerna)
+# Allt annat stängs.
+
+[Unit]
+Description=NetFyr Server — nätverksövervakning
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=netfyr
+Group=netfyr
+ExecStart=/usr/local/bin/netfyr-server --config /etc/netfyr/config.toml
+
+# Starta om vid krasch — en övervakningstjänst som ligger nere
+# övervakar ingenting.
+Restart=on-failure
+RestartSec=5
+
+# -- Härdning -----------------------------------------------------------
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/netfyr
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# Ingen anledning att kunna skapa råa socketar: ping går över ICMP-
+# datagramsocketar (ping_group_range, se install.sh).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Loggning till journald.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=netfyr
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+# NetFyr Server — exempelkonfiguration.
+# Kopiera till /etc/netfyr/config.toml och anpassa.
+
+# Adress att lyssna på.
+#
+# 127.0.0.1 bakom en TLS-terminerande proxy (rekommenderat, se README).
+# 0.0.0.0 bara om du vet vad du gör — då går trafiken i klartext.
+listen = "127.0.0.1:8080"
+
+# Databas och hemligheter (secrets.enc + secrets.key) hamnar bredvid.
+database = "/var/lib/netfyr/netfyr.db"
+
+# Frontend-filer.
+static_dir = "/usr/local/share/netfyr/web"
+
+# Loggnivå: error, warn, info, debug, trace.
+log_level = "info"
+
+# Secure-flagga på sessionskakan. Sätt true när tjänsten nås över HTTPS
+# — då vägrar webbläsaren att skicka kakan över okrypterade anslutningar.
+# Lämna false bara vid ren utveckling över HTTP.
+secure_cookies = true
+
+# Sessionens livslängd i timmar. Tolv timmar täcker ett nattpass utan
+# att lämna öppna sessioner över veckoslutet.
+session_hours = 12

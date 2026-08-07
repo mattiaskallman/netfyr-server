@@ -1,0 +1,73 @@
+[package]
+name = "netfyr-server"
+version = "1.0.0"
+edition = "2021"
+description = "NetFyr Server — nätverksövervakning som tjänst"
+authors = ["Mattias Källman"]
+license = "AGPL-3.0-only"
+repository = "https://github.com/mattiaskallman/netfyr-server"
+publish = false
+
+[dependencies]
+# HTTP
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "io-util", "net"] }
+
+# Serialisering
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Databas.
+#
+# "bundled" kompilerar in SQLite i binären. Det gör bygget något längre men
+# tar bort beroendet till systemets libsqlite3 — viktigt när binären ska
+# distribueras till maskiner vi inte kontrollerar.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Loggning
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Kanaler.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "charset"] }
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls", "hostname"] }
+rumqttc = { version = "0.24", default-features = false }
+
+# Hemligheter.
+#
+# XChaCha20-Poly1305 har 24-byte nonce, vilket gör slumpade nonce säkra
+# utan räknare. AES-GCM med 12 byte hade krävt att vi håller reda på en.
+chacha20poly1305 = "0.10"
+
+# Autentisering (etapp 5).
+#
+# Argon2id är det rekommenderade valet för lösenord: minneshårt, vilket
+# gör attacker med GPU dyra. Sessionstoken lagras aldrig i klartext —
+# bara dess SHA-256, så en databaskopia inte ger några inloggningar.
+argon2 = "0.5"
+sha2 = "0.10"
+
+# ICMP.
+#
+# surge-ping använder ICMP-DATAGRAMSOCKETAR, inte råa socketar. Det är
+# skillnaden som gör att tjänsten kan pinga i en oprivilegierad container
+# utan CAP_NET_RAW, så länge processens grupp ryms i ping_group_range.
+surge-ping = "0.8"
+
+# Lokal tid.
+#
+# Underhållsfönster med daglig återkomst räknas i LOKAL tid — ett
+# fönster 22:00-02:00 ska följa sommartid, inte ligga fast i UTC.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# Felhantering
+anyhow = "1"
+
+[profile.release]
+# Mindre binär och snabbare kod. Bygget tar längre tid, vilket är
+# acceptabelt för en tjänst som byggs sällan och körs länge.
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,736 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NetFyr</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- Inloggning. Täcker hela fönstret tills /api/auth/me svarar ok.
+     Servern nekar ändå alla API-anrop utan session — det här lagret
+     är presentation, inte skydd. -->
+<div class="login" id="login" hidden>
+  <form class="login-card" id="login-form" autocomplete="off">
+    <div class="brandmark">NF</div>
+    <div class="brand-name login-title">Net<b>Fyr</b></div>
+    <p class="login-sub" data-i18n="login.sub">nätverksvakt · logga in för att fortsätta</p>
+    <label class="login-field"><span data-i18n="login.user">Användarnamn</span>
+      <input id="login-user" autocomplete="username" required autofocus>
+    </label>
+    <label class="login-field"><span data-i18n="login.pass">Lösenord</span>
+      <input id="login-pass" type="password" autocomplete="current-password" required>
+    </label>
+    <button class="btn btn-beacon login-btn" type="submit" data-i18n="login.button">Logga in</button>
+    <span class="msg" id="login-msg"></span>
+  </form>
+</div>
+
+<aside class="rail">
+  <div class="brand">
+    <div class="brandmark">NF</div>
+    <div>
+      <div class="brand-name">Net<b>Fyr</b></div>
+      <span class="brand-sub"><span data-i18n="brandSub">vakt</span><span class="brand-version" id="version">v1.0.0</span></span>
+    </div>
+  </div>
+
+  <nav class="nav">
+    <button class="nav-item active" data-view="overview"><span class="glyph">◎</span><span data-i18n="nav.overview">Översikt</span></button>
+    <button class="nav-item" data-view="stats"><span class="glyph">▤</span><span data-i18n="nav.stats">Statistik</span></button>
+    <button class="nav-item" data-view="terminal"><span class="glyph">❯</span><span data-i18n="nav.terminal">Terminal</span></button>
+  </nav>
+
+  <div class="rail-spacer"></div>
+
+  <div class="rail-foot">
+    <button class="nav-item" data-view="settings" id="nav-settings"><span class="glyph">⚙</span><span data-i18n="nav.settings">Inställningar</span></button>
+
+    <div class="user-chip">
+      <button class="user-chip-main" data-goto="account" data-i18n-title="login.myAccount" title="Mitt konto">
+        <span class="glyph">◉</span>
+        <span id="user-name">–</span>
+        <span class="user-role" id="user-role"></span>
+      </button>
+      <button class="btn btn-sm ghost" id="btn-logout" data-i18n="login.logout">Logga ut</button>
+    </div>
+
+    <div class="rail-card" id="card-engine">
+      <div class="rail-card-top">
+        <span class="rail-card-title" data-i18n="rail.engine">Motor</span>
+        <span class="led" id="engine-led"></span>
+      </div>
+      <div class="rail-card-state" id="engine-state">–</div>
+      <div class="rail-card-meta">
+        <b id="engine-hosts">–</b>
+        <span id="engine-alarms">–</span>
+      </div>
+      <div class="rail-card-last"><span data-i18n="rail.lastSweep">Senaste svep</span> <b id="rail-sweep">–</b></div>
+    </div>
+
+    <!-- SMS-gatewayens läge. Visas/döljs via Inställningar → System —
+         inställningen är global och gäller alla användare. -->
+    <div class="rail-card" id="card-sms" hidden>
+      <div class="rail-card-top">
+        <span class="rail-card-title" data-i18n="rail.smsGw">SMS-gateway</span>
+        <span class="led" id="sms-led"></span>
+      </div>
+      <div class="rail-card-state" id="sms-rail-state">–</div>
+      <div class="rail-card-meta">
+        <b id="sms-rail-op">–</b>
+        <span id="sms-rail-signal">–</span>
+      </div>
+    </div>
+
+    <div class="rail-card">
+      <div class="switch-row">
+        <span class="switch-label" data-i18n="rail.watching">Bevakar</span>
+        <button class="toggle" id="tg-live" data-i18n-aria="rail.watching" aria-label="Bevakning"><span class="knob"></span></button>
+      </div>
+      <div class="switch-row">
+        <span class="switch-label" data-i18n="rail.alarmOn">Larm på</span>
+        <button class="toggle" id="tg-alarms" data-i18n-aria="rail.alarmOn" aria-label="Larm"><span class="knob"></span></button>
+      </div>
+    </div>
+  </div>
+</aside>
+
+<main>
+  <!-- Översikt -->
+  <section class="view" id="view-overview">
+    <div class="page-head">
+      <div>
+        <p class="eyebrow" data-i18n="dash.kicker">Översikt</p>
+        <h1 class="page-title" data-i18n="dash.title">Nätverksvakt</h1>
+      </div>
+      <div class="head-status">
+        <div class="head-stat"><span data-i18n="dash.statusLabel">status</span> <b id="head-live">–</b></div>
+        <div class="head-stat"><span data-i18n="dash.sweep">svep</span> <b id="last-sweep">–</b></div>
+      </div>
+    </div>
+
+    <div class="verdict" id="verdict" role="status" aria-live="polite">
+      <div class="verdict-line">
+        <h2 id="verdict-state">–</h2>
+        <p id="verdict-detail"></p>
+      </div>
+      <div class="tally" id="tally"></div>
+    </div>
+
+    <!-- Gruppfilter och sortering, som i desktopvariantens översikt.
+         Valet är personligt och sparas i webbläsaren — det påverkar
+         inte vad andra ser. -->
+    <div class="ov-toolbar">
+      <div class="filters" id="ov-group-filters"></div>
+      <label class="ov-sort"><span data-i18n="dash.sort">Sortera</span>
+        <select id="ov-sort">
+          <option value="status" data-i18n="dash.sortStatus">Status — problem först</option>
+          <option value="name" data-i18n="dash.sortName">Namn</option>
+          <option value="ip" data-i18n="dash.sortIp">IP-adress</option>
+        </select>
+      </label>
+    </div>
+
+    <article class="card flush">
+      <div class="dev-row head">
+        <span data-i18n="dash.colSignal">Signal</span>
+        <span data-i18n="dash.colDevice">Enhet</span>
+        <span data-i18n="dash.colLatency">Svarstid</span>
+        <span data-i18n="dash.colLast">Senast</span>
+        <span data-i18n="dash.colPolls">Pollningar</span>
+        <span></span>
+      </div>
+      <div id="host-rows"></div>
+    </article>
+  </section>
+
+  <!-- Statistik — port av desktopvariantens Stats-sida -->
+  <section class="view" id="view-stats" hidden>
+    <div class="page-head">
+      <div>
+        <p class="eyebrow" data-i18n="stats.kicker">Statistik</p>
+        <h1 class="page-title" data-i18n="stats.title">Drift &amp; svarstider</h1>
+      </div>
+      <div class="stats-controls">
+        <div class="filters" id="stats-windows">
+          <button class="chip" data-window="24h" data-i18n="stats.w24">24 tim</button>
+          <button class="chip" data-window="7d">7 d</button>
+          <button class="chip" data-window="30d">30 d</button>
+          <button class="chip" data-window="60d">60 d</button>
+          <button class="chip" data-window="90d">90 d</button>
+          <button class="chip" data-window="180d">180 d</button>
+        </div>
+        <button class="btn btn-sm" id="stats-refresh" data-i18n="stats.refresh">Uppdatera</button>
+      </div>
+    </div>
+
+    <article class="card flush">
+      <div class="kpi-row head">
+        <span data-i18n="stats.colDevice">Enhet</span>
+        <span data-i18n="stats.colUptime">Drifttid</span>
+        <span data-i18n="stats.colAvg">Snitt</span>
+        <span>p95</span>
+        <span data-i18n="stats.colLine">Svarstid över tid</span>
+      </div>
+      <div id="stats-rows"></div>
+    </article>
+
+    <article class="card events-card">
+      <div class="section-head row">
+        <div>
+          <h2 data-i18n="stats.eventsTitle">Händelser</h2>
+          <p data-i18n="stats.eventsDesc">Avbrott och återkomster i valt tidsfönster.</p>
+        </div>
+        <button class="btn btn-sm btn-danger" id="stats-clear" data-i18n="stats.clear" hidden>Rensa historik</button>
+      </div>
+      <div class="events" id="stats-events"></div>
+    </article>
+  </section>
+
+  <!-- Terminal -->
+  <section class="view" id="view-terminal" hidden>
+    <div class="page-head">
+      <div>
+        <p class="eyebrow" data-i18n="terminal.kicker">Terminal</p>
+        <h1 class="page-title" data-i18n="terminal.title">Systemlogg</h1>
+      </div>
+    </div>
+
+    <article class="card">
+      <div class="section-head">
+        <h2 data-i18n="terminal.eventsTitle">Händelser</h2>
+        <p data-i18n="terminal.eventsDesc">Vad som hänt i nätet, senast först.</p>
+      </div>
+      <div class="terminal" id="events"></div>
+    </article>
+
+    <article class="card">
+      <div class="section-head">
+        <h2 data-i18n="terminal.deliveriesTitle">Leveranser</h2>
+        <p data-i18n="terminal.deliveriesDesc">Larm på väg ut, med omförsök och felmeddelanden.</p>
+      </div>
+      <div class="terminal" id="deliveries"></div>
+    </article>
+  </section>
+
+  <!-- Inställningar -->
+  <section class="view" id="view-settings" hidden>
+    <div class="page-head">
+      <div>
+        <p class="eyebrow" data-i18n="settings.kicker">Inställningar</p>
+        <h1 class="page-title" id="settings-title">Enheter</h1>
+      </div>
+      <button class="btn btn-sm ghost" data-goto="overview" data-i18n="common.toOverview">Till översikten</button>
+    </div>
+
+    <div class="filters">
+      <button class="chip active" data-tab="devices" data-i18n="settings.tabs.devices">Enheter</button>
+      <button class="chip" data-tab="groups" data-i18n="settings.tabs.groups">Grupper</button>
+      <button class="chip" data-tab="channels" data-i18n="settings.tabs.channels">Larm</button>
+      <button class="chip" data-tab="maintenance" data-i18n="settings.tabs.maintenance">Underhåll</button>
+      <button class="chip" data-tab="system" data-i18n="settings.tabs.system">System</button>
+      <button class="chip" data-tab="users" id="chip-users" data-i18n="settings.tabs.users" hidden>Användare</button>
+    </div>
+
+    <!-- Enheter -->
+    <div class="tabview" id="tab-devices">
+      <article class="card">
+        <div class="section-head">
+          <h2 data-i18n="settings.devices.addTitle">Lägg till enhet</h2>
+          <p data-i18n="settings.devices.addDesc">Adressen är enhetens identitet och måste vara unik. Intervall och
+             trösklar kan finjusteras per enhet efteråt — fäll ut raden i listan.</p>
+        </div>
+        <div class="smtp-grid">
+          <label><span data-i18n="settings.devices.name">Namn</span><input id="nh-name" data-i18n-ph="settings.devices.phName" placeholder="Kärnswitch"></label>
+          <label><span data-i18n="settings.devices.address">Adress</span><input id="nh-address" data-i18n-ph="settings.devices.phAddr" placeholder="192.168.1.1"></label>
+          <label><span data-i18n="settings.devices.group">Grupp</span><select id="nh-group"></select></label>
+          <label class="wide"><span data-i18n="settings.devices.note">Notering</span><input id="nh-note" data-i18n-ph="settings.devices.phNote" placeholder="Valfri notering"></label>
+        </div>
+        <div class="ch-status">
+          <button class="btn btn-beacon" id="nh-add" data-i18n="common.add">Lägg till</button>
+          <span class="msg" id="nh-msg"></span>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="section-head"><h2 data-i18n="settings.devices.listTitle">Bevakade enheter</h2></div>
+        <div class="rows" id="device-rows"></div>
+      </article>
+    </div>
+
+    <!-- Grupper -->
+    <div class="tabview" id="tab-groups" hidden>
+      <article class="card">
+        <div class="section-head">
+          <h2 data-i18n="settings.groups.title">Grupper</h2>
+          <p data-i18n="settings.groups.desc">Grupper samlar enheter i översikten och kan användas som mål
+             för underhållsfönster. Att ta bort en grupp flyttar inte enheterna —
+             de hamnar utan grupp.</p>
+        </div>
+        <div class="ch-status" style="margin-bottom:10px">
+          <input id="gr-new" data-i18n-ph="settings.groups.phNew" placeholder="Ny grupp, t.ex. Kameror" style="max-width:280px">
+          <button class="btn" id="gr-add" data-i18n="common.create">Skapa</button>
+          <span class="msg" id="gr-msg"></span>
+        </div>
+        <div class="rows" id="group-rows"></div>
+      </article>
+    </div>
+
+    <!-- Larm -->
+    <div class="tabview" id="tab-channels" hidden>
+      <article class="card">
+        <div class="section-head">
+          <h2 data-i18n="settings.ch.webhookTitle">Webhook</h2>
+          <p data-i18n="settings.ch.webhookDesc">POST-anrop med larmet som JSON. Adressen sparas som hemlighet —
+             den innehåller ofta en token och ska inte synas i klartext.</p>
+        </div>
+        <div class="switch-row">
+          <div class="switch-text">
+            <div class="switch-label" data-i18n="common.active">Aktiv</div>
+            <p class="switch-desc" id="wh-status" data-i18n="common.notConfigured">Ej konfigurerad</p>
+          </div>
+          <button class="toggle" id="wh-toggle" aria-label="Webhook"><span class="knob"></span></button>
+        </div>
+        <div class="smtp-grid">
+          <label class="wide"><span><span data-i18n="settings.ch.webhookUrl">Adress</span> <em data-i18n="settings.ch.webhookKeepHint">(lämna tom för att behålla sparad)</em></span><input id="wh-url" type="password" placeholder="https://…" autocomplete="off"></label>
+        </div>
+        <div class="ch-status">
+          <button class="btn btn-beacon" id="wh-save" data-i18n="common.save">Spara</button>
+          <button class="btn" id="wh-test" data-i18n="common.test">Testa</button>
+          <span class="msg" id="wh-msg"></span>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="section-head">
+          <h2 data-i18n="settings.ch.smtpTitle">E-post (SMTP)</h2>
+        </div>
+        <div class="switch-row">
+          <div class="switch-text">
+            <div class="switch-label" data-i18n="common.active">Aktiv</div>
+            <p class="switch-desc" id="smtp-status" data-i18n="common.notConfigured">Ej konfigurerad</p>
+          </div>
+          <button class="toggle" id="smtp-toggle" aria-label="SMTP"><span class="knob"></span></button>
+        </div>
+        <div class="smtp-grid">
+          <label><span data-i18n="settings.ch.smtpHost">Server</span><input id="smtp-host" placeholder="smtp.example.com"></label>
+          <label><span data-i18n="settings.ch.smtpPort">Port</span><input id="smtp-port" type="number" min="1" value="587"></label>
+          <label><span data-i18n="settings.ch.smtpSecurity">Kryptering</span>
+            <select id="smtp-security">
+              <option value="starttls">STARTTLS</option>
+              <option value="ssl">SSL/TLS</option>
+              <option value="none" data-i18n="settings.ch.smtpSecNone">Ingen</option>
+            </select>
+          </label>
+          <label><span data-i18n="settings.ch.smtpFrom">Från</span><input id="smtp-from" placeholder="netfyr@example.com"></label>
+          <label><span data-i18n="settings.ch.smtpTo">Till</span><input id="smtp-to" placeholder="larm@example.com"></label>
+          <label><span data-i18n="settings.ch.smtpUser">Användare</span><input id="smtp-user" autocomplete="off"></label>
+          <label><span><span data-i18n="common.password">Lösenord</span> <em data-i18n="common.passwordKept">(behålls om tomt)</em></span><input id="smtp-pass" type="password" autocomplete="new-password"></label>
+        </div>
+        <div class="ch-status">
+          <button class="btn btn-beacon" id="smtp-save" data-i18n="common.save">Spara</button>
+          <button class="btn" id="smtp-test" data-i18n="common.test">Testa</button>
+          <span class="msg" id="smtp-msg"></span>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="section-head">
+          <h2>MQTT</h2>
+        </div>
+        <div class="switch-row">
+          <div class="switch-text">
+            <div class="switch-label" data-i18n="common.active">Aktiv</div>
+            <p class="switch-desc" id="mqtt-status" data-i18n="common.notConfigured">Ej konfigurerad</p>
+          </div>
+          <button class="toggle" id="mqtt-toggle" aria-label="MQTT"><span class="knob"></span></button>
+        </div>
+        <div class="smtp-grid">
+          <label><span data-i18n="settings.ch.mqttHost">Broker</span><input id="mqtt-host" placeholder="192.168.1.249"></label>
+          <label><span data-i18n="settings.ch.mqttPort">Port</span><input id="mqtt-port" type="number" min="1" value="1883"></label>
+          <label><span data-i18n="settings.ch.mqttClientId">Klient-id</span><input id="mqtt-clientid" placeholder="netfyr-server"></label>
+          <label><span data-i18n="settings.ch.mqttTopic">Ämne</span><input id="mqtt-topic" placeholder="netfyr/larm"></label>
+          <label><span data-i18n="settings.ch.mqttUser">Användare</span><input id="mqtt-user" autocomplete="off"></label>
+          <label><span><span data-i18n="common.password">Lösenord</span> <em data-i18n="common.passwordKept">(behålls om tomt)</em></span><input id="mqtt-pass" type="password" autocomplete="new-password"></label>
+        </div>
+        <div class="ch-status">
+          <button class="btn btn-beacon" id="mqtt-save" data-i18n="common.save">Spara</button>
+          <button class="btn" id="mqtt-test" data-i18n="common.test">Testa</button>
+          <span class="msg" id="mqtt-msg"></span>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="section-head">
+          <h2 data-i18n="settings.ch.smsTitle">SMS (Teltonika-gateway)</h2>
+          <p data-i18n="settings.ch.smsDesc">Skickar larm som SMS via en Teltonika-router på nätverket.
+             Mottagare: kommaseparerade nummer med landskod.</p>
+        </div>
+        <div class="switch-row">
+          <div class="switch-text">
+            <div class="switch-label" data-i18n="common.active">Aktiv</div>
+            <p class="switch-desc" id="sms-status" data-i18n="common.notConfigured">Ej konfigurerad</p>
+          </div>
+          <button class="toggle" id="sms-toggle" aria-label="SMS"><span class="knob"></span></button>
+        </div>
+        <div class="smtp-grid">
+          <label><span data-i18n="settings.ch.smsHost">Gateway</span><input id="sms-host" placeholder="192.168.1.240"></label>
+          <label class="narrow"><span data-i18n="settings.ch.smsScheme">Schema</span>
+            <select id="sms-scheme"><option value="https">https</option><option value="http">http</option></select>
+          </label>
+          <label class="narrow"><span data-i18n="settings.ch.smsTimeout">Timeout (ms)</span><input id="sms-timeout" type="number" min="2000" max="120000" step="500" placeholder="15000"></label>
+          <label><span data-i18n="settings.ch.smsUser">Användare</span><input id="sms-user" autocomplete="off"></label>
+          <label><span><span data-i18n="common.password">Lösenord</span> <em data-i18n="common.passwordKept">(behålls om tomt)</em></span><input id="sms-pass" type="password" autocomplete="new-password"></label>
+          <label class="narrow"><span data-i18n="settings.ch.smsModemId">Modem-ID</span><input id="sms-modemid" data-i18n-ph="settings.ch.smsModemAuto" placeholder="Hämtas automatiskt"></label>
+          <label class="wide"><span data-i18n="settings.ch.smsRecipients">Mottagare</span><input id="sms-recipients" placeholder="+46701234567, +46709876543"></label>
+          <label class="wide"><span data-i18n="settings.ch.smsTemplate">Larmmall</span><input id="sms-template" placeholder="NetFyr: {enhet} ({adress}) svarar inte"></label>
+          <label class="wide"><span data-i18n="settings.ch.smsRecovery">Återställningsmall</span><input id="sms-recovery" placeholder="NetFyr: {enhet} ({adress}) åter i drift"></label>
+        </div>
+        <p class="field-hint" data-i18n="settings.ch.smsTokenHint">Platshållare i mallarna: {enhet}, {adress}, {status}, {tid}
+           och {id} (kvittenskod vid eskalering).</p>
+        <div class="switch-row">
+          <div class="switch-text">
+            <div class="switch-label" data-i18n="settings.ch.smsSelfSigned">Tillåt självsignerat certifikat</div>
+            <p class="switch-desc" data-i18n="settings.ch.smsSelfSignedDesc">Gatewayen har normalt ett eget certifikat — utan detta nekas anslutningen.</p>
+          </div>
+          <button class="toggle" id="sms-selfsigned" data-i18n-aria="settings.ch.smsSelfSigned" aria-label="Självsignerat certifikat"><span class="knob"></span></button>
+        </div>
+        <div class="switch-row">
+          <div class="switch-text">
+            <div class="switch-label" data-i18n="settings.ch.smsEscalation">Eskalering med SMS-kvittering</div>
+            <p class="switch-desc" data-i18n="settings.ch.smsEscalationDesc">Larma en i taget tills någon svarar på SMS:et.
+               Svaret ska innehålla koden i larmet, t.ex. [A7].</p>
+          </div>
+          <button class="toggle" id="sms-escalation" data-i18n-aria="settings.ch.smsEscalation" aria-label="Eskalering"><span class="knob"></span></button>
+        </div>
+        <div id="sms-esc-settings" hidden>
+          <div class="smtp-grid">
+            <label class="narrow"><span data-i18n="settings.ch.smsEscSec">Eskalera efter (s)</span><input id="sms-escsec" type="number" min="30" step="30" placeholder="300"></label>
+            <label class="narrow"><span data-i18n="settings.ch.smsAckWindow">Kvittensfönster (min)</span><input id="sms-ackwindow" type="number" min="5" step="5" placeholder="60"></label>
+            <label class="narrow"><span data-i18n="settings.ch.smsPollSec">Inkorgspollning (s)</span><input id="sms-pollsec" type="number" min="10" step="10" placeholder="30"></label>
+          </div>
+          <div class="switch-row">
+            <div class="switch-text">
+              <div class="switch-label" data-i18n="settings.ch.smsDelAck">Radera kvittensen i gatewayen</div>
+              <p class="switch-desc" data-i18n="settings.ch.smsDelAckDesc">Kräver skrivrätt för meddelanden i gatewayens ACL.</p>
+            </div>
+            <button class="toggle" id="sms-delack" data-i18n-aria="settings.ch.smsDelAck" aria-label="Radera efter kvittens"><span class="knob"></span></button>
+          </div>
+          <p class="field-hint warn" id="sms-id-warning" data-i18n="settings.ch.smsIdWarning" hidden>⚠ Larmmallen saknar {id} — mottagaren
+             vet inte vilken kod den ska svara med.</p>
+        </div>
+        <div class="ch-status">
+          <button class="btn btn-beacon" id="sms-save" data-i18n="common.save">Spara</button>
+          <button class="btn" id="sms-verify" data-i18n="settings.ch.smsVerify">Verifiera behörighet</button>
+          <button class="btn" id="sms-test" data-i18n="common.test">Testa</button>
+          <span class="msg" id="sms-msg"></span>
+        </div>
+        <div id="sms-verify-result" hidden></div>
+        <div class="sms-subhead">
+          <h3 data-i18n="settings.ch.smsGatewayStatus">Gateway-status</h3>
+          <button class="btn btn-small" id="sms-refresh-status" data-i18n="common.refresh">Uppdatera</button>
+        </div>
+        <div id="sms-gateway-status" class="sms-status-grid"><span class="field-hint" data-i18n="settings.ch.smsNotFetched">Inte hämtad ännu.</span></div>
+        <div class="sms-subhead"><h3 data-i18n="settings.ch.smsSessionsTitle">Senaste eskaleringar</h3></div>
+        <div id="sms-sessions"><span class="field-hint" data-i18n="settings.ch.smsNoSessions">Inga sessioner än.</span></div>
+      </article>
+
+      <article class="card">
+        <div class="section-head">
+          <h2 data-i18n="settings.ch.secretsTitle">Lösenord och nycklar</h2>
+          <p data-i18n="settings.ch.secretsDesc">Sparade värden kan bytas eller tas bort, men aldrig läsas tillbaka — inte
+             heller av det här gränssnittet.</p>
+        </div>
+        <div class="smtp-grid">
+          <label><span data-i18n="settings.ch.secretChannel">Kanal</span><input id="sec-name" placeholder="webhook"></label>
+          <label><span data-i18n="settings.ch.secretValue">Värde</span><input id="sec-value" type="password" data-i18n-ph="settings.ch.secretValuePh" placeholder="klistra in"></label>
+        </div>
+        <div class="ch-status">
+          <button class="btn" id="sec-save" data-i18n="common.save">Spara</button>
+          <span class="msg" id="sec-msg"></span>
+        </div>
+        <div class="pills" id="sec-list"></div>
+      </article>
+    </div>
+
+    <!-- Underhåll -->
+    <div class="tabview" id="tab-maintenance" hidden>
+      <article class="card">
+        <div class="section-head">
+          <h2 data-i18n="settings.maint.addTitle">Nytt underhållsfönster</h2>
+          <p data-i18n="settings.maint.addDesc">Larm tystas medan ett fönster är aktivt. Enheterna bevakas som
+             vanligt — det är bara larmen som hålls tillbaka.</p>
+        </div>
+        <div class="smtp-grid">
+          <label class="wide"><span data-i18n="settings.maint.label">Etikett</span><input id="mw-label" data-i18n-ph="settings.maint.phLabel" placeholder="Nattlig backup"></label>
+          <label><span data-i18n="settings.maint.target">Gäller</span>
+            <select id="mw-target">
+              <option value="all" data-i18n="settings.maint.targetAll">Alla enheter</option>
+              <option value="group" data-i18n="settings.maint.targetGroup">En grupp</option>
+              <option value="hosts" data-i18n="settings.maint.targetHosts">Valda enheter</option>
+            </select>
+          </label>
+          <label id="mw-group-wrap" hidden><span data-i18n="settings.maint.group">Grupp</span><select id="mw-group"></select></label>
+          <label><span data-i18n="settings.maint.schedule">Schema</span>
+            <select id="mw-kind">
+              <option value="once" data-i18n="settings.maint.schedOnce">Engångsfönster</option>
+              <option value="daily" data-i18n="settings.maint.schedDaily">Återkommande, dagligen</option>
+            </select>
+          </label>
+        </div>
+        <div id="mw-hosts-wrap" class="maint-hosts" hidden></div>
+        <div class="smtp-grid" id="mw-once-wrap">
+          <label><span data-i18n="settings.maint.start">Start</span><input id="mw-start" type="datetime-local"></label>
+          <label><span data-i18n="settings.maint.end">Slut</span><input id="mw-end" type="datetime-local"></label>
+        </div>
+        <div class="smtp-grid" id="mw-daily-wrap" hidden>
+          <label><span data-i18n="settings.maint.time">Klockslag</span><input id="mw-time" type="time" value="02:00"></label>
+          <label><span data-i18n="settings.maint.duration">Längd (minuter)</span><input id="mw-duration" type="number" min="1" value="60"></label>
+        </div>
+        <div id="mw-days-wrap" hidden>
+          <div class="maint-days" id="mw-days"></div>
+        </div>
+        <div class="ch-status">
+          <button class="btn btn-beacon" id="mw-add" data-i18n="common.add">Lägg till</button>
+          <span class="msg" id="mw-msg"></span>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="section-head"><h2 data-i18n="settings.maint.listTitle">Planerade fönster</h2></div>
+        <div class="rows" id="mw-rows"></div>
+      </article>
+    </div>
+
+    <!-- System -->
+    <div class="tabview" id="tab-system" hidden>
+      <article class="card">
+        <div class="section-head">
+          <h2 data-i18n="settings.sys.monitorTitle">Bevakning</h2>
+          <p data-i18n="settings.sys.monitorDesc">Svepintervallet styr hur ofta enheterna pingas. Perioderna avgör hur länge
+             ett fel respektive ett svar måste hålla i sig innan det räknas — de finns
+             för att en enstaka tappad ping inte ska larma.</p>
+        </div>
+        <div class="switch-row">
+          <div class="switch-text">
+            <div class="switch-label" data-i18n="settings.sys.slowAlarm">Latenslarm</div>
+            <p class="switch-desc" data-i18n="settings.sys.slowAlarmDesc">Larma när en enhet svarar långsammare än tröskeln tillräckligt länge. Latenslarm eskalerar aldrig via SMS — det är en varning, inte ett nattlarm.</p>
+          </div>
+          <button class="toggle" id="st-slowalarm" data-i18n-aria="settings.sys.slowAlarm" aria-label="Latenslarm"><span class="knob"></span></button>
+        </div>
+        <div class="smtp-grid">
+          <label><span data-i18n="settings.sys.sweep">Svep (s)</span><input id="st-sweep" type="number" min="2"></label>
+          <label><span data-i18n="settings.sys.fail">Ner efter (s)</span><input id="st-fail" type="number" min="1"></label>
+          <label><span data-i18n="settings.sys.success">Upp efter (s)</span><input id="st-success" type="number" min="1"></label>
+          <label><span data-i18n="settings.sys.slow">Långsam över (ms)</span><input id="st-slow" type="number" min="1"></label>
+          <label><span data-i18n="settings.sys.slowAlarmSec">Larma efter (s)</span><input id="st-slowalarm-sec" type="number" min="5" max="3600"></label>
+          <label><span data-i18n="settings.sys.packet">Paketstorlek</span><input id="st-packet" type="number" min="16"></label>
+          <label><span data-i18n="settings.sys.timeout">Tidsgräns (s)</span><input id="st-timeout" type="number" min="1"></label>
+        </div>
+        <div class="ch-status">
+          <button class="btn btn-beacon" id="st-save" data-i18n="common.save">Spara</button>
+          <span class="msg" id="st-msg"></span>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="section-head">
+          <h2 data-i18n="settings.sys.wdTitle">Vakthund</h2>
+          <p data-i18n="settings.sys.wdDesc">Öppnar en TCP-port som svarar så länge bevakningen pågår. En
+             extern vakthund kan då se skillnad på att servern övervakar
+             och att den bara är igång — ping svarar även när bevakningen
+             är avstängd. Kräver att porten släpps fram i brandväggen.</p>
+        </div>
+        <div class="switch-row">
+          <div class="switch-text">
+            <div class="switch-label" data-i18n="settings.sys.wdEnable">Signalera bevakning på nätet</div>
+            <p class="switch-desc" data-i18n="settings.sys.wdEnableDesc">Porten är uppe endast när bevakningen
+               pågår — inte bara när servern kör.</p>
+          </div>
+          <button class="toggle" id="wd-enabled" data-i18n-aria="settings.sys.wdEnable" aria-label="Signalera bevakning på nätet"><span class="knob"></span></button>
+        </div>
+        <div id="wd-fields" hidden>
+          <div class="smtp-grid">
+            <label><span data-i18n="settings.sys.wdPort">Port</span><input id="wd-port" type="number" min="1024" max="65535"></label>
+            <label><span data-i18n="settings.sys.wdGrace">Respit vid paus (min)</span><input id="wd-grace" type="number" min="0" max="1440"></label>
+          </div>
+          <p class="switch-desc" data-i18n="settings.sys.wdGraceDesc">Porten hålls uppe så här länge efter att
+             bevakningen pausats, så att planerat arbete inte larmar.
+             Noll stänger porten direkt.</p>
+          <div class="ch-status">
+            <button class="btn btn-beacon" id="wd-save" data-i18n="common.save">Spara</button>
+            <span class="msg" id="wd-msg"></span>
+          </div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="section-head">
+          <h2 data-i18n="settings.sys.moveTitle">Flytta konfiguration</h2>
+          <p data-i18n="settings.sys.moveDesc">Exportera enheter och grupper som JSON — samma format som
+             desktopvarianten, så filen kan resa båda hållen. Hemligheter
+             följer aldrig med.</p>
+        </div>
+        <div class="ch-status">
+          <button class="btn" id="xp-export" data-i18n="settings.sys.exportBtn">Exportera</button>
+          <button class="btn btn-beacon" id="xp-import" data-i18n="settings.sys.importBtn">Importera…</button>
+          <input type="file" id="xp-file" accept="application/json" hidden>
+          <span class="msg" id="xp-msg"></span>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="section-head">
+          <h2 data-i18n="settings.sys.uiTitle">Gränssnitt</h2>
+          <p data-i18n="settings.sys.uiDesc">Visningsval som gäller hela servern — alla användare ser
+             samma sidopanel, precis som i desktopvarianten.</p>
+        </div>
+        <div class="switch-row">
+          <div class="switch-text">
+            <div class="switch-label" data-i18n="settings.lang.title">Språk</div>
+            <p class="switch-desc" data-i18n="settings.lang.desc">Följer webbläsaren som standard. Valet är personligt och sparas i den här webbläsaren — andra användare påverkas inte.</p>
+          </div>
+          <select class="lang-select" id="lang-select-settings">
+            <option value="system" data-i18n="settings.lang.system">System</option>
+            <option value="sv">Svenska</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+        <div class="switch-row">
+          <div class="switch-text">
+            <div class="switch-label" data-i18n="settings.sys.serverLang">Serverspråk</div>
+            <p class="switch-desc" data-i18n="settings.sys.serverLangDesc">Språket för motorns delade texter:
+               API-fel, händelseloggen, leveransfel och SMS-standardmallar. Gäller alla användare.</p>
+          </div>
+          <select class="server-lang" id="server-lang">
+            <option value="sv">Svenska</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+        <div class="switch-row">
+          <div class="switch-text">
+            <div class="switch-label" data-i18n="settings.sys.uiSmsRail">SMS-gateway i sidopanelen</div>
+            <p class="switch-desc" data-i18n="settings.sys.uiSmsRailDesc">Visar gatewayens läge — operatör och
+               signalstyrka — under motorkortet till vänster.</p>
+          </div>
+          <button class="toggle" id="ui-smsrail" data-i18n-aria="settings.sys.uiSmsRail" aria-label="SMS-gateway i sidopanelen"><span class="knob"></span></button>
+        </div>
+        <div class="switch-row">
+          <div class="switch-text">
+            <div class="switch-label" data-i18n="settings.sys.uiEngineRail">Motorkort i sidopanelen</div>
+            <p class="switch-desc" data-i18n="settings.sys.uiEngineRailDesc">Visar motorns läge, enhetsantal och
+               tidpunkt för senaste svep högst upp till vänster.</p>
+          </div>
+          <button class="toggle" id="ui-engrail" data-i18n-aria="settings.sys.uiEngineRail" aria-label="Motorkort i sidopanelen"><span class="knob"></span></button>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="section-head"><h2 data-i18n="settings.sys.aboutTitle">Om</h2></div>
+        <p class="empty" id="about">NetFyr Server</p>
+      </article>
+    </div>
+
+    <!-- Användare (admin) -->
+    <div class="tabview" id="tab-users" hidden>
+      <article class="card">
+        <div class="section-head">
+          <h2 data-i18n="settings.users.newTitle">Ny användare</h2>
+          <p data-i18n="settings.users.newDesc">Lösenordet blir ett engångslösen — användaren måste byta det vid
+             första inloggningen. Minst tolv tecken.</p>
+        </div>
+        <div class="smtp-grid">
+          <label><span data-i18n="settings.users.username">Användarnamn</span><input id="nu-name" data-i18n-ph="settings.users.phUsername" placeholder="nattvakt"></label>
+          <label><span data-i18n="settings.users.oneTime">Engångslösenord</span><input id="nu-pass" type="password" autocomplete="new-password"></label>
+          <label><span data-i18n="settings.users.role">Roll</span>
+            <select id="nu-role">
+              <option value="user" data-i18n="settings.users.roleUser">user — ser läget, kvitterar larm</option>
+              <option value="admin" data-i18n="settings.users.roleAdmin">admin — full kontroll</option>
+            </select>
+          </label>
+        </div>
+        <div class="ch-status">
+          <button class="btn btn-beacon" id="nu-add" data-i18n="common.create">Skapa</button>
+          <span class="msg" id="nu-msg"></span>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="section-head"><h2 data-i18n="settings.users.listTitle">Konton</h2></div>
+        <div class="rows" id="user-rows"></div>
+      </article>
+
+      <article class="card">
+        <div class="section-head">
+          <h2 data-i18n="settings.users.auditTitle">Auditlogg</h2>
+          <p data-i18n="settings.users.auditDesc">Vem gjorde vad, när och varifrån. Kan inte redigeras —
+             gallring sker automatiskt efter drygt ett år.</p>
+        </div>
+        <div class="terminal" id="audit"></div>
+      </article>
+    </div>
+  </section>
+
+  <!-- Mitt konto -->
+  <section class="view" id="view-account" hidden>
+    <div class="page-head">
+      <div>
+        <p class="eyebrow" data-i18n="settings.account.kicker">Konto</p>
+        <h1 class="page-title" data-i18n="settings.account.title">Mitt konto</h1>
+      </div>
+      <button class="btn btn-sm ghost" data-goto="overview" data-i18n="common.toOverview">Till översikten</button>
+    </div>
+
+    <article class="card" id="must-change-card" hidden>
+      <div class="section-head">
+        <h2 data-i18n="settings.account.mustChangeTitle">Lösenordet måste bytas</h2>
+        <p data-i18n="settings.account.mustChangeDesc">Du loggade in med ett engångslösenord. Välj ett eget innan
+           du fortsätter — minst tolv tecken.</p>
+      </div>
+    </article>
+
+    <article class="card">
+      <div class="section-head">
+        <h2 data-i18n="settings.account.changeTitle">Byt lösenord</h2>
+        <p data-i18n="settings.account.changeDesc">Vid byte loggas alla andra enheter och sessioner ut.</p>
+      </div>
+      <div class="smtp-grid">
+        <label><span data-i18n="settings.account.current">Nuvarande lösenord</span><input id="pw-current" type="password" autocomplete="current-password"></label>
+        <label><span data-i18n="settings.account.new">Nytt lösenord</span><input id="pw-new" type="password" autocomplete="new-password"></label>
+        <label><span data-i18n="settings.account.newAgain">Nytt lösenord igen</span><input id="pw-new2" type="password" autocomplete="new-password"></label>
+      </div>
+      <div class="ch-status">
+        <button class="btn btn-beacon" id="pw-save" data-i18n="settings.account.changeBtn">Byt lösenord</button>
+        <span class="msg" id="pw-msg"></span>
+      </div>
+    </article>
+
+    <!-- Språkvalet finns även här: rollen user ser inte Inställningar,
+         men språk är ett personligt val som alla ska kunna byta. -->
+    <article class="card">
+      <div class="section-head">
+        <h2 data-i18n="settings.lang.title">Språk</h2>
+        <p data-i18n="settings.lang.desc">Följer webbläsaren som standard. Valet är personligt och sparas i den här webbläsaren — andra användare påverkas inte.</p>
+      </div>
+      <div class="switch-row">
+        <div class="switch-text">
+          <div class="switch-label" data-i18n="settings.lang.title">Språk</div>
+        </div>
+        <select class="lang-select" id="lang-select-account">
+          <option value="system" data-i18n="settings.lang.system">System</option>
+          <option value="sv">Svenska</option>
+          <option value="en">English</option>
+        </select>
+      </div>
+    </article>
+  </section>
+</main>
+
+<script src="/i18n.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

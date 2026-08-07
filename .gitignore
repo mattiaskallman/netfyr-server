@@ -1,0 +1,9 @@
+/target
+/dist
+*.db
+*.db-shm
+*.db-wal
+secrets.enc
+config.toml
+secrets.key
+dev-config.toml
