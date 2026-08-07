@@ -1,6 +1,6 @@
 [package]
 name = "netfyr-server"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 description = "NetFyr Server — nätverksövervakning som tjänst"
 authors = ["Mattias Källman"]

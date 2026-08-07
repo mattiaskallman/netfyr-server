@@ -50,10 +50,10 @@ async fn main() -> Result<()> {
     match auth::bootstrap_admin(&db).await {
         Ok(Some(password)) => {
             tracing::warn!("=====================================================");
-            tracing::warn!("FÖRSTA KÖRNINGEN — administratörskonto skapat");
-            tracing::warn!("  användarnamn: admin");
-            tracing::warn!("  engångslösenord: {password}");
-            tracing::warn!("Logga in och byt lösenordet omedelbart.");
+            tracing::warn!("FIRST RUN — administrator account created");
+            tracing::warn!("  username: admin");
+            tracing::warn!("  one-time password: {password}");
+            tracing::warn!("Sign in and change the password immediately.");
             tracing::warn!("=====================================================");
         }
         Ok(None) => {}

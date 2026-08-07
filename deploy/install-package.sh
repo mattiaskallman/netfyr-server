@@ -132,4 +132,4 @@ else
   curl -fsS http://127.0.0.1:8080/api/health >/dev/null
 fi
 
-echo "First admin password: journalctl -u netfyr -n 50 | sed -n '/FÖRSTA KÖRNINGEN/,+4p'"
+echo "First admin password: journalctl -u netfyr -n 50 | sed -n '/FIRST RUN/,+4p'"

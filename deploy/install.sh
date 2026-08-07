@@ -48,6 +48,6 @@ systemctl enable netfyr
 systemctl restart netfyr
 
 echo
-echo "Klart. Engångslösenordet för admin står i journalen:"
-echo "  journalctl -u netfyr -n 30 | grep -A4 'FÖRSTA KÖRNINGEN'"
-echo "Byt det vid första inloggningen."
+echo "Done. The one-time admin password is in the service journal:"
+echo "  journalctl -u netfyr -n 30 | grep -A4 'FIRST RUN'"
+echo "Change it at first login."

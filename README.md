@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.1-2f855a" alt="Version 1.0.1">
+  <img src="https://img.shields.io/badge/version-1.0.2-2f855a" alt="Version 1.0.2">
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0">
   <img src="https://img.shields.io/badge/platform-Debian%2013-lightgrey" alt="Platform: Debian 13">
   <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20Axum-orange" alt="Built with Rust and Axum">
@@ -52,10 +52,10 @@ When the installer has been accepted upstream, the canonical command will use
   script=$(mktemp)
   trap 'rm -f "$script"' EXIT
   curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-    https://raw.githubusercontent.com/mattiaskallman/netfyr-server/v1.0.1/community-scripts/ct/netfyr.sh \
+    https://raw.githubusercontent.com/mattiaskallman/netfyr-server/v1.0.2/community-scripts/ct/netfyr.sh \
     -o "$script"
   printf '%s  %s\n' \
-    7349f1b2c1f78a0b1e9c44b4e8426d937671a03ddbadad45ed7c6635efa5a489 \
+    27564cda3070f1639b5d7c1ef6243cf4c73c0f436b94035ceff2fd6579fbef23 \
     "$script" | sha256sum -c -
   bash "$script"
 )
@@ -126,7 +126,7 @@ If the database has no users, NetFyr creates `admin` with a generated one-time
 password. Read it locally from the service journal:
 
 ```bash
-journalctl -u netfyr -n 50 | sed -n '/FÖRSTA KÖRNINGEN/,+4p'
+journalctl -u netfyr -n 50 | sed -n '/FIRST RUN/,+4p'
 ```
 
 The password must be changed at first login.

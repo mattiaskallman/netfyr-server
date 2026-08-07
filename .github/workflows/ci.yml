@@ -30,6 +30,7 @@ jobs:
           ./scripts/test-release-download.sh
           ./scripts/test-update-transaction.sh
           ./scripts/test-community-installer-regressions.sh
+          ./scripts/test-first-run-language.sh
       - name: Verify release archive
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
