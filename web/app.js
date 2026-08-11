@@ -225,6 +225,7 @@ function applyRole() {
 }
 
 async function boot() {
+  clearInstalledAppBadge();
   try {
     me = await api.get("/auth/me");
   } catch {
@@ -238,6 +239,11 @@ async function boot() {
 function clearInstalledAppBadge() {
   if (typeof navigator.clearAppBadge === "function") {
     navigator.clearAppBadge().catch(() => {});
+  }
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.ready
+      .then((registration) => registration.active?.postMessage({ type: "CLEAR_APP_BADGE" }))
+      .catch(() => {});
   }
 }
 
@@ -301,6 +307,13 @@ function latency(us) {
 function clock(ms) {
   if (!ms) return "–";
   return new Date(ms).toLocaleTimeString(I18N.locale());
+}
+
+function dateTime(ms) {
+  if (!ms) return "–";
+  const d = new Date(ms);
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 /** "sedan 14:32" är vad en operatör frågar sig, inte en tidsstämpel. */
@@ -909,7 +922,7 @@ function renderLog(events, deliveries) {
     ? events
         .map(
           (e) =>
-            `<div><time>${clock(e.ts)}</time><span class="lv-${esc(e.level)}">${esc(e.text)}</span></div>`,
+            `<div><time>${dateTime(e.ts)}</time><span class="lv-${esc(e.level)}">${esc(e.text)}</span></div>`,
         )
         .join("")
     : `<p class="empty">${t("common.nothingLogged")}</p>`;
@@ -926,7 +939,7 @@ function renderLog(events, deliveries) {
                 ? t("terminal.gaveUp", { n: d.attempts })
                 : t("terminal.waiting", { n: d.attempts });
           const err = d.lastError ? ` — ${esc(d.lastError)}` : "";
-          return `<div><time>${clock(d.createdAt)}</time><span class="lv-${lv}">${esc(
+          return `<div><time>${dateTime(d.createdAt)}</time><span class="lv-${lv}">${esc(
             d.channel,
           )} → ${esc(d.device)} (${esc(d.event)}) · ${tail}${err}</span></div>`;
         })
@@ -2046,7 +2059,7 @@ function renderUsers(users, auditRows) {
           const detail = a.detail ? ` — ${esc(a.detail)}` : "";
           const ip = a.ip ? ` · ${esc(a.ip)}` : "";
           const lv = a.action === "login_fail" ? "warn" : "info";
-          return `<div><time>${clock(a.ts)}</time><span class="lv-${lv}"><b>${esc(a.username)}</b> ${what}${target}${detail}${ip}</span></div>`;
+          return `<div><time>${dateTime(a.ts)}</time><span class="lv-${lv}"><b>${esc(a.username)}</b> ${what}${target}${detail}${ip}</span></div>`;
         })
         .join("")
     : `<p class="empty">${t("common.nothingLogged")}</p>`;

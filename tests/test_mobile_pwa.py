@@ -199,6 +199,8 @@ class PushHandlerTests(unittest.TestCase):
         self.assertIn("openWindow", worker)
         self.assertIn("setAppBadge", worker)
         self.assertIn("clearAppBadge", app)
+        self.assertIn('type: "CLEAR_APP_BADGE"', app)
+        self.assertIn('self.addEventListener("message"', worker)
         # Parse-fel får inte ge tyst svikt — generisk fallback måste finnas.
         self.assertIn("catch", worker)
         # Notisdata renderas av OS:et via showNotification — aldrig via DOM.

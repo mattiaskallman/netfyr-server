@@ -1,7 +1,9 @@
 // NetFyr PWA — cachar endast det statiska appskalet.
 // API-anrop lämnas helt till webbläsarens nätverksstack: operativ status får
 // aldrig ersättas med ett gammalt cachesvar som ser aktuellt ut.
-const CACHE_NAME = "netfyr-shell-v2";
+const CACHE_NAME = "netfyr-shell-v3";
+const BADGE_STATE_CACHE = "netfyr-badge-state-v1";
+const BADGE_STATE_KEY = "/.netfyr-badge-state";
 const SHELL = [
   "/",
   "/style.css",
@@ -70,6 +72,47 @@ self.addEventListener("fetch", (event) => {
 // Payloaden är AlarmPayload-JSON från servern. Ett parse-fel får aldrig
 // svälja larmet tyst — då visas en generisk notis så att användaren
 // ändå uppmärksammar händelsen.
+// Badgeuppdateringar serialiseras så att samtidiga push-event inte kan läsa
+// samma gamla antal. Cache Storage bevarar räknaren när iOS avslutar workern.
+let badgeUpdateQueue = Promise.resolve();
+
+function incrementAppBadge() {
+  if (typeof self.navigator?.setAppBadge !== "function") return Promise.resolve();
+
+  const update = async () => {
+    const cache = await caches.open(BADGE_STATE_CACHE);
+    const stored = await cache.match(BADGE_STATE_KEY);
+    const raw = stored ? Number(await stored.text()) : 0;
+    const previous = Number.isSafeInteger(raw) && raw >= 0 ? raw : 0;
+    const count = Math.min(previous + 1, Number.MAX_SAFE_INTEGER);
+    await cache.put(BADGE_STATE_KEY, new Response(String(count)));
+    await self.navigator.setAppBadge(count);
+  };
+
+  const task = badgeUpdateQueue.then(update, update);
+  badgeUpdateQueue = task.catch(() => {});
+  return task.catch(() => {});
+}
+
+function clearStoredAppBadge() {
+  const reset = async () => {
+    const cache = await caches.open(BADGE_STATE_CACHE);
+    await cache.delete(BADGE_STATE_KEY);
+    if (typeof self.navigator?.clearAppBadge === "function") {
+      await self.navigator.clearAppBadge();
+    }
+  };
+
+  const task = badgeUpdateQueue.then(reset, reset);
+  badgeUpdateQueue = task.catch(() => {});
+  return task.catch(() => {});
+}
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type !== "CLEAR_APP_BADGE") return;
+  event.waitUntil(clearStoredAppBadge());
+});
+
 self.addEventListener("push", (event) => {
   let data = {};
   try {
@@ -91,9 +134,7 @@ self.addEventListener("push", (event) => {
     renotify: true,
     data: { url: "/" },
   });
-  const appBadge = typeof self.navigator?.setAppBadge === "function"
-    ? self.navigator.setAppBadge().catch(() => {})
-    : Promise.resolve();
+  const appBadge = incrementAppBadge();
   event.waitUntil(Promise.all([notification, appBadge]));
 });
 
