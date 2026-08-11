@@ -22,5 +22,9 @@ actual_installer=$(sha256sum community-scripts/install/netfyr-install.sh | cut -
 actual_wrapper=$(sha256sum community-scripts/ct/netfyr.sh | cut -d' ' -f1)
 grep -Fq "netfyr-server/${tag}/community-scripts/ct/netfyr.sh" README.md || { echo "README tag mismatch" >&2; exit 1; }
 grep -Fq "$actual_wrapper" README.md || { echo "README wrapper hash mismatch" >&2; exit 1; }
+grep -Fq "badge/version-${version}-" README.md || { echo "README badge version mismatch" >&2; exit 1; }
+grep -Fq "alt=\"Version ${version}\"" README.md || { echo "README badge label mismatch" >&2; exit 1; }
+grep -Fq "immutable ${tag} tag" community-scripts/ct/netfyr.sh || { echo "Wrapper comment version mismatch" >&2; exit 1; }
+grep -Fq "id=\"version\">${tag}</span>" web/index.html || { echo "Web version mismatch" >&2; exit 1; }
 
 echo "Release chain $tag: OK"
