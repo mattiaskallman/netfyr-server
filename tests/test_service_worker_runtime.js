@@ -182,10 +182,10 @@ async function main() {
   });
 
   const activationWorker = loadWorker({
-    cacheKeys: ["netfyr-shell-v2", "netfyr-shell-v3", "netfyr-badge-state-v1"],
+    cacheKeys: ["netfyr-shell-v2", "netfyr-shell-v3", "netfyr-shell-v4", "netfyr-badge-state-v1"],
   });
   await activationWorker.dispatchActivate();
-  assert.deepEqual(activationWorker.calls.cacheDeletes, ["netfyr-shell-v2"],
+  assert.deepEqual(activationWorker.calls.cacheDeletes, ["netfyr-shell-v2", "netfyr-shell-v3"],
     "activation must preserve current shell and persistent badge state caches");
 
   const staticResponse = worker.dispatch("https://netfyr.test/style.css");
@@ -195,7 +195,7 @@ async function main() {
   await worker.lastWaitUntil;
   assert.equal(worker.calls.fetch, 1);
   assert.equal(worker.calls.cachePut, 1);
-  assert.deepEqual(worker.calls.cacheOpens, ["netfyr-shell-v3"]);
+  assert.deepEqual(worker.calls.cacheOpens, ["netfyr-shell-v4"]);
 
   worker.setFetch(async () => { throw new Error("offline"); });
   const navigation = worker.dispatch("https://netfyr.test/", { mode: "navigate" });

@@ -52,6 +52,7 @@ const I18N = (() => {
       logout: "Logga ut",
       myAccount: "Mitt konto",
       notLoggedIn: "inte inloggad",
+      idleWarning: "Du har varit inaktiv och loggas snart ut. Vill du fortsätta vara inloggad?",
     },
     nav: { primary: "Primär navigation", overview: "Översikt", stats: "Statistik", terminal: "Terminal", account: "Konto", settings: "Inställningar" },
     connection: {
@@ -489,6 +490,7 @@ const I18N = (() => {
       logout: "Sign out",
       myAccount: "My account",
       notLoggedIn: "not signed in",
+      idleWarning: "You have been inactive and will soon be signed out. Do you want to stay signed in?",
     },
     nav: { primary: "Primary navigation", overview: "Overview", stats: "Statistics", terminal: "Terminal", account: "Account", settings: "Settings" },
     connection: {

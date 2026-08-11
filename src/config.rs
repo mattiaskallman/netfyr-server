@@ -39,8 +39,15 @@ pub struct Config {
     pub secure_cookies: bool,
 
     /// Sessionens livslängd i timmar. Tolv timmar täcker ett nattpass
-    /// utan att lämna en öppen session över veckoslutet.
+    /// och är administratörens absoluta sessionsgräns.
     pub session_hours: i64,
+
+    /// Administratörer loggas ut efter så här många minuter utan verklig
+    /// användaraktivitet. Automatisk statuspollning räknas inte.
+    pub admin_idle_minutes: i64,
+
+    /// Operatörens rullande sessionslivslängd i dygn.
+    pub operator_session_days: i64,
 }
 
 impl Default for Config {
@@ -52,6 +59,8 @@ impl Default for Config {
             log_level: "info".to_string(),
             secure_cookies: false,
             session_hours: 12,
+            admin_idle_minutes: 15,
+            operator_session_days: 30,
         }
     }
 }

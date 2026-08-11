@@ -21,6 +21,14 @@ log_level = "info"
 # Lämna false bara vid ren utveckling över HTTP.
 secure_cookies = true
 
-# Sessionens livslängd i timmar. Tolv timmar täcker ett nattpass utan
-# att lämna öppna sessioner över veckoslutet.
+# Administratörens absoluta sessionslivslängd i timmar. Värden över 12
+# begränsas alltid till 12 av servern; idle-gränsen nedan gäller samtidigt.
 session_hours = 12
+
+# Administratörer loggas ut efter denna tid utan mänsklig aktivitet.
+# Automatisk statuspollning håller inte sessionen vaken.
+admin_idle_minutes = 15
+
+# Operatörssessioner kan stå öppna kontinuerligt och förnyas vid mänsklig
+# aktivitet. Helt övergivna sessioner löper ändå ut efter denna tid.
+operator_session_days = 30

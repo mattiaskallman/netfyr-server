@@ -1,7 +1,7 @@
 // NetFyr PWA — cachar endast det statiska appskalet.
 // API-anrop lämnas helt till webbläsarens nätverksstack: operativ status får
 // aldrig ersättas med ett gammalt cachesvar som ser aktuellt ut.
-const CACHE_NAME = "netfyr-shell-v3";
+const CACHE_NAME = "netfyr-shell-v4";
 const BADGE_STATE_CACHE = "netfyr-badge-state-v1";
 const BADGE_STATE_KEY = "/.netfyr-badge-state";
 const SHELL = [
@@ -9,6 +9,7 @@ const SHELL = [
   "/style.css",
   "/i18n.js",
   "/refresh-coordinator.js",
+  "/session-activity.js",
   "/app.js",
   "/manifest.webmanifest",
   "/favicon-32.png",

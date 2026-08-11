@@ -17,7 +17,13 @@
 // servern säger nej.
 // =====================================================================
 
-use axum::{extract::State, http::StatusCode, middleware, routing::{get, post, put}, Json, Router};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    middleware,
+    routing::{get, post, put},
+    Json, Router,
+};
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Instant;
@@ -39,6 +45,10 @@ pub struct AppState {
     pub secure_cookies: bool,
     /// Sessionens livslängd i timmar.
     pub session_hours: i64,
+    /// Administratörens inaktivitetsgräns i minuter.
+    pub admin_idle_minutes: i64,
+    /// Operatörens rullande sessionslivslängd i dygn.
+    pub operator_session_days: i64,
 }
 
 pub fn build(state: AppState, static_dir: Option<std::path::PathBuf>) -> Router {
@@ -53,6 +63,7 @@ pub fn build(state: AppState, static_dir: Option<std::path::PathBuf>) -> Router 
     // Inloggad, båda rollerna: läsa läget och svara på larm.
     let authed = Router::new()
         .route("/auth/logout", post(api::auth::logout))
+        .route("/auth/activity", post(api::auth::activity))
         .route("/auth/me", get(api::auth::me))
         .route("/auth/password", post(api::auth::change_password))
         .route("/overview", get(api::overview::get))
@@ -116,7 +127,10 @@ pub fn build(state: AppState, static_dir: Option<std::path::PathBuf>) -> Router 
         .route("/export", get(api::transfer::export))
         .route("/import", post(api::transfer::import))
         .route("/secrets", get(api::secrets::list))
-        .route("/secrets/{name}", put(api::secrets::set).delete(api::secrets::remove))
+        .route(
+            "/secrets/{name}",
+            put(api::secrets::set).delete(api::secrets::remove),
+        )
         .route("/users", get(api::users::list).post(api::users::create))
         .route(
             "/users/{id}",
@@ -179,9 +193,11 @@ async fn real_ip(
             .and_then(|xff| xff.rsplit(',').map(str::trim).find(|s| !s.is_empty()))
             .and_then(|last| last.parse::<std::net::IpAddr>().ok());
         if let Some(ip) = real {
-            req.extensions_mut().insert(axum::extract::ConnectInfo(
-                std::net::SocketAddr::new(ip, addr.port()),
-            ));
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::new(
+                    ip,
+                    addr.port(),
+                )));
         }
     }
     next.run(req).await
@@ -192,7 +208,10 @@ async fn real_ip(
 /// CSP:n är snäv: allt kommer från samma ursprung, inga externa
 /// teckensnitt eller skript (air-gap-principen). 'unsafe-inline' för
 /// stil behövs eftersom gränssnittet sätter style-attribut dynamiskt.
-async fn security_headers(req: axum::extract::Request, next: middleware::Next) -> axum::response::Response {
+async fn security_headers(
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
     let is_api = req.uri().path().starts_with("/api");
     let mut res = next.run(req).await;
     let h = res.headers_mut();

@@ -106,6 +106,40 @@ let sessionController = new AbortController();
 let sessionGeneration = 0;
 let pendingLogoutController = null;
 
+const sessionActivity = NetFyrSessionActivity.create({
+  getRole: () => me?.role ?? null,
+  touch: () => api.send("POST", "/auth/activity"),
+  logout: () => logoutCurrentSession(),
+  confirmStay: () => confirm(t("login.idleWarning")),
+});
+
+const SHARED_ACTIVITY_KEY = "netfyr-session-activity";
+const sessionActivityChannel = typeof BroadcastChannel === "function"
+  ? new BroadcastChannel(SHARED_ACTIVITY_KEY)
+  : null;
+if (sessionActivityChannel) {
+  sessionActivityChannel.addEventListener("message", () => sessionActivity.recordSharedActivity());
+} else {
+  window.addEventListener("storage", (event) => {
+    if (event.key === SHARED_ACTIVITY_KEY) sessionActivity.recordSharedActivity();
+  });
+}
+
+function recordHumanActivity() {
+  if (!sessionActivity.recordHumanActivity()) return;
+  if (sessionActivityChannel) sessionActivityChannel.postMessage("activity");
+  else {
+    try { localStorage.setItem(SHARED_ACTIVITY_KEY, String(Date.now())); } catch { /* privat läge */ }
+  }
+}
+
+for (const eventName of ["pointerdown", "keydown", "touchstart", "scroll"]) {
+  document.addEventListener(eventName, recordHumanActivity, {
+    capture: true,
+    passive: true,
+  });
+}
+
 function clearSessionState() {
   overview = null;
   groupsCache = [];
@@ -152,6 +186,7 @@ function clearSessionState() {
 }
 
 function showLogin() {
+  sessionActivity.stop();
   me = null;
   sessionGeneration += 1;
   sessionController.abort();
@@ -187,7 +222,7 @@ $("login-form").addEventListener("submit", async (e) => {
   }
 });
 
-$("btn-logout").addEventListener("click", async () => {
+async function logoutCurrentSession() {
   const controller = new AbortController();
   pendingLogoutController?.abort();
   pendingLogoutController = controller;
@@ -198,7 +233,9 @@ $("btn-logout").addEventListener("click", async () => {
   await logoutRequest;
   clearTimeout(timeout);
   if (pendingLogoutController === controller) pendingLogoutController = null;
-});
+}
+
+$("btn-logout").addEventListener("click", logoutCurrentSession);
 
 // ---- Rollstyrning -------------------------------------------------------
 //
@@ -262,6 +299,7 @@ function startApp() {
   pushSubscriptionCache = null;
   const generation = sessionGeneration;
   const signal = sessionController.signal;
+  sessionActivity.start({ adminIdleMs: me.adminIdleMinutes * 60 * 1000 });
   applyRole();
   if (!pollTimer) pollTimer = setInterval(refresh, POLL_MS);
   refresh();

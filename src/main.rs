@@ -147,7 +147,9 @@ async fn main() -> Result<()> {
         secrets,
         started_at: Instant::now(),
         secure_cookies: cfg.secure_cookies,
-        session_hours: cfg.session_hours,
+        session_hours: auth::effective_admin_session_hours(cfg.session_hours),
+        admin_idle_minutes: cfg.admin_idle_minutes,
+        operator_session_days: cfg.operator_session_days,
     };
     let app = routes::build(state, cfg.static_dir.clone());
 

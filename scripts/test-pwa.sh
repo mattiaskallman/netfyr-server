@@ -7,9 +7,11 @@ node tests/test_refresh_coordinator.js
 node tests/test_service_worker_runtime.js
 node tests/test_app_boot_badge.js
 node tests/test_log_timestamps.js
+node tests/test_session_activity.js
 node --check web/app.js
 node --check web/i18n.js
 node --check web/refresh-coordinator.js
+node --check web/session-activity.js
 node --check web/service-worker.js
 python3 -m json.tool web/manifest.webmanifest >/dev/null
 

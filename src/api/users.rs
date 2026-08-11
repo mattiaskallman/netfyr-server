@@ -121,7 +121,9 @@ pub async fn create(
         .db
         .call(move |conn| {
             let exists: Option<i64> = conn
-                .query_row("SELECT id FROM users WHERE username = ?1", [&uname], |r| r.get(0))
+                .query_row("SELECT id FROM users WHERE username = ?1", [&uname], |r| {
+                    r.get(0)
+                })
                 .optional()?;
             if exists.is_some() {
                 anyhow::bail!(crate::i18n::username_taken(lang));
@@ -133,11 +135,7 @@ pub async fn create(
                 params![uname, hash, role, now],
             )?;
             let id = conn.last_insert_rowid();
-            let row = conn.query_row(
-                &format!("{SELECT} WHERE id = ?1"),
-                [id],
-                read_row,
-            )?;
+            let row = conn.query_row(&format!("{SELECT} WHERE id = ?1"), [id], read_row)?;
             Ok(row)
         })
         .await
@@ -166,6 +164,27 @@ pub struct UserPatch {
     pub password: Option<String>,
 }
 
+fn set_role_and_revoke_sessions(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    current_role: &str,
+    new_role: &str,
+) -> anyhow::Result<()> {
+    if current_role == new_role {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE users SET role = ?2 WHERE id = ?1",
+        params![user_id, new_role],
+    )?;
+    // Rollpolicyn ändras omedelbart. Återkallelse gör dessutom att ett
+    // parallellt /auth/activity aldrig kan förlänga med den gamla rollen.
+    auth::destroy_user_sessions(&tx, user_id, None)?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub async fn update(
     State(state): State<Arc<AppState>>,
     Extension(actor): Extension<AuthUser>,
@@ -176,7 +195,9 @@ pub async fn update(
     // Skydden: inte sig själv, inte sista admin.
     let lang = crate::i18n::load_db(&state.db).await;
     if actor.id == id && (p.role.is_some() || p.disabled.is_some()) {
-        return Err(ApiError::bad_request(crate::i18n::self_change_forbidden(lang)));
+        return Err(ApiError::bad_request(crate::i18n::self_change_forbidden(
+            lang,
+        )));
     }
 
     if let Some(role) = &p.role {
@@ -203,9 +224,11 @@ pub async fn update(
         .db
         .call(move |conn| {
             let target: Option<(String, String)> = conn
-                .query_row("SELECT username, role FROM users WHERE id = ?1", [id], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })
+                .query_row(
+                    "SELECT username, role FROM users WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
                 .optional()?;
             let Some((target_name, target_role)) = target else {
                 return Ok(Err(UserReject::NotFound));
@@ -226,7 +249,7 @@ pub async fn update(
 
             let now = now_ms();
             if let Some(role) = &p.role {
-                conn.execute("UPDATE users SET role = ?2 WHERE id = ?1", params![id, role])?;
+                set_role_and_revoke_sessions(conn, id, &target_role, role)?;
             }
             if let Some(dis) = p.disabled {
                 conn.execute(
@@ -247,7 +270,10 @@ pub async fn update(
                 )?;
                 auth::destroy_user_sessions(conn, id, None)?;
             }
-            conn.execute("UPDATE users SET updated_at = ?2 WHERE id = ?1", params![id, now])?;
+            conn.execute(
+                "UPDATE users SET updated_at = ?2 WHERE id = ?1",
+                params![id, now],
+            )?;
 
             let row = conn.query_row(&format!("{SELECT} WHERE id = ?1"), [id], read_row)?;
             Ok(Ok((row, target_name)))
@@ -302,7 +328,9 @@ pub async fn delete(
 ) -> ApiResult<Json<()>> {
     if actor.id == id {
         let lang = crate::i18n::load_db(&state.db).await;
-        return Err(ApiError::bad_request(crate::i18n::self_delete_forbidden(lang)));
+        return Err(ApiError::bad_request(crate::i18n::self_delete_forbidden(
+            lang,
+        )));
     }
 
     let ip = addr.ip().to_string();
@@ -312,9 +340,11 @@ pub async fn delete(
         .db
         .call(move |conn| {
             let target: Option<(String, String)> = conn
-                .query_row("SELECT username, role FROM users WHERE id = ?1", [id], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })
+                .query_row(
+                    "SELECT username, role FROM users WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
                 .optional()?;
             let Some((name, role)) = target else {
                 return Ok(Err(UserReject::NotFound));
@@ -360,4 +390,33 @@ pub async fn delete(
     .await;
 
     Ok(Json(()))
+}
+
+#[cfg(test)]
+mod role_session_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn rollbyte_återkallar_användarens_sessioner() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, role TEXT NOT NULL);
+             CREATE TABLE sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL);
+             INSERT INTO users VALUES (1, 'user');
+             INSERT INTO sessions VALUES ('token', 1);",
+        )
+        .unwrap();
+
+        set_role_and_revoke_sessions(&conn, 1, "user", "admin").unwrap();
+
+        let role: String = conn
+            .query_row("SELECT role FROM users WHERE id=1", [], |r| r.get(0))
+            .unwrap();
+        let sessions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(role, "admin");
+        assert_eq!(sessions, 0);
+    }
 }

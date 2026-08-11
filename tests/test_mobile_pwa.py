@@ -126,10 +126,13 @@ class ConnectionStateTests(unittest.TestCase):
         ):
             self.assertIn(marker, app)
 
-        logout = app.split('$("btn-logout").addEventListener', 1)[1].split("// ---- Rollstyrning", 1)[0]
+        logout = app.split("async function logoutCurrentSession()", 1)[1].split(
+            '$("btn-logout").addEventListener', 1
+        )[0]
         self.assertIn("showLogin();", logout)
         self.assertIn("await logoutRequest;", logout)
         self.assertLess(logout.index("showLogin();"), logout.index("await logoutRequest;"))
+        self.assertIn('$("btn-logout").addEventListener("click", logoutCurrentSession);', app)
         self.assertIn('api.send("POST", "/channels/sms/verify", undefined, { signal })', app)
         self.assertIn("class StaleSessionError extends Error", app)
         self.assertIn("if (isStaleSession(err)) return;", app)

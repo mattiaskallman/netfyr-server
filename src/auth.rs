@@ -25,7 +25,9 @@
 // =====================================================================
 
 use anyhow::Result;
-use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::{
+    rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
+};
 use argon2::Argon2;
 use axum::extract::{Request, State};
 use axum::http::header;
@@ -48,6 +50,13 @@ pub const MAX_FAILED_ATTEMPTS: i64 = 5;
 
 /// Utelåsningens längd i millisekunder (en kvart).
 pub const LOCKOUT_MS: i64 = 15 * 60 * 1000;
+
+/// Administratörens absoluta sessionsgräns får aldrig höjas via config.
+pub const MAX_ADMIN_SESSION_HOURS: i64 = 12;
+
+pub fn effective_admin_session_hours(configured_hours: i64) -> i64 {
+    configured_hours.clamp(1, MAX_ADMIN_SESSION_HOURS)
+}
 
 /// Auditloggens livslängd i dygn. Drygt ett år — NIS2-arbete kräver
 //  att incidenter går att följa upp långt efteråt.
@@ -74,6 +83,12 @@ impl Role {
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SessionPolicy {
+    pub admin_hours: i64,
+    pub operator_days: i64,
 }
 
 /// Den inloggade användaren, uppslagen från sessionen en gång per
@@ -130,8 +145,7 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
 ///
 /// Strängen är en giltig Argon2id-kodning av ett värdelöst lösenord —
 /// den kan aldrig matcha ett riktigt försök.
-const DUMMY_HASH: &str =
-    "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0c2FsdA$\
+const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0c2FsdA$\
      X4ylOc+6KyXnWy5l06GrKj7UzBvVbbUQKSctwI9gGsA";
 
 pub fn verify_dummy(password: &str) {
@@ -177,43 +191,97 @@ pub fn generate_one_time_password() -> String {
 pub fn create_session(
     conn: &rusqlite::Connection,
     user_id: i64,
-    session_hours: i64,
+    role: Role,
+    policy: SessionPolicy,
     ip: Option<&str>,
     user_agent: Option<&str>,
 ) -> Result<String> {
+    create_session_at(conn, user_id, role, policy, ip, user_agent, now_ms())
+}
+
+fn create_session_at(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    role: Role,
+    policy: SessionPolicy,
+    ip: Option<&str>,
+    user_agent: Option<&str>,
+    now: i64,
+) -> Result<String> {
     let token = generate_token();
-    let now = now_ms();
-    let expires = now + session_hours.max(1) * 3_600_000;
+    let expires = match role {
+        Role::Admin => now + effective_admin_session_hours(policy.admin_hours) * 3_600_000,
+        Role::User => now + policy.operator_days.max(1) * 86_400_000,
+    };
     conn.execute(
-        "INSERT INTO sessions (token_hash, user_id, created_at, expires_at, ip, user_agent)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO sessions (token_hash, user_id, created_at, last_activity, expires_at, ip, user_agent)
+         VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6)",
         params![hash_token(&token), user_id, now, expires, ip, user_agent],
     )?;
     Ok(token)
 }
 
-/// Slå upp en session till sin användare. None vid ogiltig, utgången
-/// eller avstängd. Utgångna sessioner raderas i förbifarten — annars
-/// växer tabellen mellan städningarna.
-fn resolve_session(conn: &rusqlite::Connection, token: &str) -> Result<Option<AuthUser>> {
-    let now = now_ms();
+/// Slå upp en session till sin användare. None vid ogiltig, utgången,
+/// inaktiv administratör eller avstängd. Ogiltiga sessioner raderas i
+/// förbifarten — annars växer tabellen mellan städningarna.
+fn resolve_session(
+    conn: &rusqlite::Connection,
+    token: &str,
+    admin_idle_minutes: i64,
+    admin_session_hours: i64,
+) -> Result<Option<AuthUser>> {
+    resolve_session_at(
+        conn,
+        token,
+        now_ms(),
+        admin_idle_minutes,
+        admin_session_hours,
+    )
+}
+
+fn resolve_session_at(
+    conn: &rusqlite::Connection,
+    token: &str,
+    now: i64,
+    admin_idle_minutes: i64,
+    admin_session_hours: i64,
+) -> Result<Option<AuthUser>> {
     let hash = hash_token(token);
 
-    let row: Option<(i64, i64, String, String, i64)> = conn
+    let row: Option<(i64, i64, i64, i64, String, String, i64)> = conn
         .query_row(
-            "SELECT s.user_id, s.expires_at, u.username, u.role, u.disabled
+            "SELECT s.user_id, s.created_at, s.expires_at,
+                    COALESCE(s.last_activity, s.created_at),
+                    u.username, u.role, u.disabled
              FROM sessions s JOIN users u ON u.id = s.user_id
              WHERE s.token_hash = ?1",
             [&hash],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            },
         )
         .optional()?;
 
-    let Some((user_id, expires_at, username, role, disabled)) = row else {
+    let Some((user_id, created_at, expires_at, last_activity, username, role, disabled)) = row
+    else {
         return Ok(None);
     };
 
-    if expires_at <= now {
+    let parsed_role = Role::parse(&role).unwrap_or(Role::User);
+    let admin_idle_ms = admin_idle_minutes.max(1) * 60_000;
+    let admin_absolute_ms = effective_admin_session_hours(admin_session_hours) * 3_600_000;
+    if expires_at <= now
+        || (parsed_role == Role::Admin
+            && (last_activity <= now - admin_idle_ms || created_at <= now - admin_absolute_ms))
+    {
         conn.execute("DELETE FROM sessions WHERE token_hash = ?1", [&hash])?;
         return Ok(None);
     }
@@ -224,7 +292,7 @@ fn resolve_session(conn: &rusqlite::Connection, token: &str) -> Result<Option<Au
     Ok(Some(AuthUser {
         id: user_id,
         username,
-        role: Role::parse(&role).unwrap_or(Role::User),
+        role: parsed_role,
     }))
 }
 
@@ -234,6 +302,42 @@ pub fn destroy_session(conn: &rusqlite::Connection, token: &str) -> Result<()> {
         [hash_token(token)],
     )?;
     Ok(())
+}
+
+/// Registrera uttrycklig mänsklig aktivitet. För operatörer förnyas även
+/// den rullande sessionsgränsen; administratörens absoluta gräns flyttas
+/// aldrig fram.
+pub fn touch_session(
+    conn: &rusqlite::Connection,
+    token: &str,
+    role: Role,
+    operator_session_days: i64,
+) -> Result<bool> {
+    touch_session_at(conn, token, role, now_ms(), operator_session_days)
+}
+
+fn touch_session_at(
+    conn: &rusqlite::Connection,
+    token: &str,
+    role: Role,
+    now: i64,
+    operator_session_days: i64,
+) -> Result<bool> {
+    let hash = hash_token(token);
+    let updated = match role {
+        Role::Admin => conn.execute(
+            "UPDATE sessions SET last_activity = ?2 WHERE token_hash = ?1",
+            params![hash, now],
+        )?,
+        Role::User => {
+            let expires = now + operator_session_days.max(1) * 86_400_000;
+            conn.execute(
+                "UPDATE sessions SET last_activity = ?2, expires_at = ?3 WHERE token_hash = ?1",
+                params![hash, now, expires],
+            )?
+        }
+    };
+    Ok(updated == 1)
 }
 
 /// Ta bort alla sessioner för en användare, utom eventuellt en angiven.
@@ -272,11 +376,22 @@ pub fn token_from_request(req: &Request) -> Option<String> {
     None
 }
 
-/// Bygg Set-Cookie-värdet för en ny session.
-pub fn session_cookie(token: &str, session_hours: i64, secure: bool) -> String {
+pub fn cookie_max_age_seconds(
+    role: Role,
+    admin_session_hours: i64,
+    operator_session_days: i64,
+) -> i64 {
+    match role {
+        Role::Admin => effective_admin_session_hours(admin_session_hours) * 3600,
+        Role::User => operator_session_days.max(1) * 86_400,
+    }
+}
+
+/// Bygg Set-Cookie-värdet för en ny eller förnyad session.
+pub fn session_cookie(token: &str, max_age_seconds: i64, secure: bool) -> String {
     let mut cookie = format!(
         "{COOKIE_NAME}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
-        session_hours.max(1) * 3600
+        max_age_seconds.max(1)
     );
     // Secure-flaggan får bara sättas över HTTPS — annars vägrar
     // webbläsaren kakan helt. Därför styrs den av konfigurationen.
@@ -312,10 +427,12 @@ pub async fn require_auth(
     next: Next,
 ) -> Response {
     let token = token_from_request(&req);
+    let admin_idle_minutes = state.admin_idle_minutes;
+    let admin_session_hours = state.session_hours;
     let user = match token {
         Some(t) => state
             .db
-            .call(move |conn| resolve_session(conn, &t))
+            .call(move |conn| resolve_session(conn, &t, admin_idle_minutes, admin_session_hours))
             .await
             .ok()
             .flatten(),
@@ -341,10 +458,12 @@ pub async fn require_admin(
     next: Next,
 ) -> Response {
     let token = token_from_request(&req);
+    let admin_idle_minutes = state.admin_idle_minutes;
+    let admin_session_hours = state.session_hours;
     let user = match token {
         Some(t) => state
             .db
-            .call(move |conn| resolve_session(conn, &t))
+            .call(move |conn| resolve_session(conn, &t, admin_idle_minutes, admin_session_hours))
             .await
             .ok()
             .flatten(),
@@ -427,5 +546,181 @@ pub async fn run_janitor(db: Db) {
             }
             Err(e) => tracing::warn!("städningen misslyckades: {e:#}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn session_db(
+        role: &str,
+        created_at: i64,
+        last_activity: i64,
+        expires_at: i64,
+    ) -> (Connection, String) {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE users (
+                id INTEGER PRIMARY KEY,
+                username TEXT NOT NULL,
+                role TEXT NOT NULL,
+                disabled INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE sessions (
+                token_hash TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                last_activity INTEGER,
+                expires_at INTEGER NOT NULL,
+                ip TEXT,
+                user_agent TEXT
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO users (id, username, role) VALUES (1, 'test', ?1)",
+            [role],
+        )
+        .unwrap();
+        let token = "test-token".to_string();
+        conn.execute(
+            "INSERT INTO sessions (token_hash, user_id, created_at, last_activity, expires_at)
+             VALUES (?1, 1, ?2, ?3, ?4)",
+            params![hash_token(&token), created_at, last_activity, expires_at],
+        )
+        .unwrap();
+        (conn, token)
+    }
+
+    #[test]
+    fn admin_session_avvisas_efter_femton_minuters_inaktivitet() {
+        let now = 2_000_000;
+        let (conn, token) = session_db("admin", 0, now - 15 * 60 * 1000, now + 1_000_000);
+
+        let user = resolve_session_at(&conn, &token, now, 15, 12).unwrap();
+
+        assert!(user.is_none());
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0, "den inaktiva sessionen ska raderas");
+    }
+
+    #[test]
+    fn admin_session_gäller_fram_till_inaktivitetsgränsen() {
+        let now = 2_000_000;
+        let (conn, token) = session_db("admin", 0, now - 15 * 60 * 1000 + 1, now + 1_000_000);
+
+        let user = resolve_session_at(&conn, &token, now, 15, 12)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(user.role, Role::Admin);
+    }
+
+    #[test]
+    fn befordrad_operatör_får_admins_absoluta_tolv_timmar() {
+        let now = 50_000_000;
+        let (conn, token) = session_db(
+            "admin",
+            now - 12 * 3_600_000,
+            now - 1_000,
+            now + 30 * 86_400_000,
+        );
+
+        let user = resolve_session_at(&conn, &token, now, 15, 12).unwrap();
+
+        assert!(user.is_none());
+    }
+
+    #[test]
+    fn aktivitet_på_återkallad_session_avvisas() {
+        let (conn, token) = session_db("user", 0, 0, 1);
+        conn.execute("DELETE FROM sessions", []).unwrap();
+
+        let touched = touch_session_at(&conn, &token, Role::User, 2_000_000, 30).unwrap();
+
+        assert!(!touched);
+    }
+
+    #[test]
+    fn operatörens_aktivitet_förnyar_sessionen_trettio_dygn() {
+        let now = 2_000_000;
+        let old_expiry = now + 1_000;
+        let (conn, token) = session_db("user", 0, now - 500, old_expiry);
+
+        touch_session_at(&conn, &token, Role::User, now, 30).unwrap();
+
+        let (last_activity, expires_at): (i64, i64) = conn
+            .query_row("SELECT last_activity, expires_at FROM sessions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(last_activity, now);
+        assert_eq!(expires_at, now + 30 * 86_400_000);
+    }
+
+    #[test]
+    fn felkonfigurerad_adminpolicy_begränsas_till_tolv_timmar() {
+        let now = 50_000_000;
+        let (conn, _) = session_db("admin", 0, 0, 1);
+        conn.execute("DELETE FROM sessions", []).unwrap();
+        let policy = SessionPolicy {
+            admin_hours: 72,
+            operator_days: 30,
+        };
+        create_session_at(&conn, 1, Role::Admin, policy, None, None, now).unwrap();
+        let expires_at: i64 = conn
+            .query_row("SELECT expires_at FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(expires_at, now + 12 * 3_600_000);
+        assert_eq!(cookie_max_age_seconds(Role::Admin, 72, 30), 12 * 3_600);
+
+        conn.execute(
+            "UPDATE sessions SET created_at=?1, last_activity=?2, expires_at=?3",
+            params![now - 12 * 3_600_000, now - 1_000, now + 72 * 3_600_000],
+        )
+        .unwrap();
+        let token_hash: String = conn
+            .query_row("SELECT token_hash FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        let token = "replacement-test-token";
+        conn.execute(
+            "UPDATE sessions SET token_hash=?1 WHERE token_hash=?2",
+            params![hash_token(token), token_hash],
+        )
+        .unwrap();
+        assert!(resolve_session_at(&conn, token, now, 15, 72)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn nya_sessioner_får_rollstyrd_absolut_livslängd() {
+        let now = 2_000_000;
+        let (admin_conn, _) = session_db("admin", 0, 0, 1);
+        admin_conn.execute("DELETE FROM sessions", []).unwrap();
+        let policy = SessionPolicy {
+            admin_hours: 12,
+            operator_days: 30,
+        };
+        create_session_at(&admin_conn, 1, Role::Admin, policy, None, None, now).unwrap();
+        let admin_expiry: i64 = admin_conn
+            .query_row("SELECT expires_at FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(admin_expiry, now + 12 * 3_600_000);
+
+        let (user_conn, _) = session_db("user", 0, 0, 1);
+        user_conn.execute("DELETE FROM sessions", []).unwrap();
+        create_session_at(&user_conn, 1, Role::User, policy, None, None, now).unwrap();
+        let (last_activity, user_expiry): (i64, i64) = user_conn
+            .query_row("SELECT last_activity, expires_at FROM sessions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(last_activity, now);
+        assert_eq!(user_expiry, now + 30 * 86_400_000);
     }
 }
