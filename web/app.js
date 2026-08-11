@@ -235,7 +235,18 @@ async function boot() {
   startApp();
 }
 
+function clearInstalledAppBadge() {
+  if (typeof navigator.clearAppBadge === "function") {
+    navigator.clearAppBadge().catch(() => {});
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") clearInstalledAppBadge();
+});
+
 function startApp() {
+  clearInstalledAppBadge();
   pendingLogoutController?.abort();
   pendingLogoutController = null;
   sessionController.abort();
