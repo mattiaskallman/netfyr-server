@@ -7,8 +7,8 @@
 NETFYR_CS_REF="4c9bb2636d0ebecef074c3661b170a3496d9cb37"
 NETFYR_CS_BASE="https://raw.githubusercontent.com/community-scripts/ProxmoxVED/${NETFYR_CS_REF}"
 NETFYR_BUILD_FUNC_SHA256="85908170cfb8d0dff244a354822b380be7ec335c792ea7fbe7a11bd2ec72cf00"
-NETFYR_SCRIPT_REF="v1.2.0"
-NETFYR_INSTALL_SHA256="a2f0f8bbea140672b0c71cc14a4a6e5fee3b9f8942bd52e75e55b69471adbb1f"
+NETFYR_SCRIPT_REF="v1.2.1"
+NETFYR_INSTALL_SHA256="fe663aeae5b1a50722894d439fce7f6aa2c554637af15ebc02edc8ccd4b2e20a"
 
 # build.func sources additional helpers immediately, so pin its base URL
 # before sourcing it. Otherwise those helpers would still come from main.
@@ -26,7 +26,7 @@ else
   rm -f "$_netfyr_build_func"
 fi
 
-# Standalone mode routes only NetFyr's installer to the immutable v1.2.0 tag.
+# Standalone mode routes only NetFyr's installer to the immutable v1.2.1 tag.
 eval "$(declare -f _cs_fetch_text | sed '1s/_cs_fetch_text/_netfyr_upstream_fetch_text/')"
 _cs_fetch_text() {
   if [[ "$1" == "install/netfyr-install.sh" ]]; then

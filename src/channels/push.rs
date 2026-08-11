@@ -70,7 +70,7 @@ impl Default for PushConfig {
 }
 
 fn default_subject() -> String {
-    "mailto:netfyr@localhost".into()
+    "https://github.com/mattiaskallman/netfyr-server".into()
 }
 
 // ---------------------------------------------------------------------
@@ -680,6 +680,14 @@ mod tests {
         "8pfeW0KbunFT06SuDKoJH9Ql87S1QUrdirN6GcG7sFz1y1sqLgVi1VhjVkHsUoEsbI_0LpXMuGvnzQ";
 
     #[test]
+    fn default_vapid_subject_is_accepted_by_apple_push() {
+        assert_eq!(
+            PushConfig::default().subject,
+            "https://github.com/mattiaskallman/netfyr-server"
+        );
+    }
+
+    #[test]
     fn rfc8291_appendix_a_known_answer() {
         let plaintext = b64url_decode(PLAINTEXT_B64).unwrap();
         let as_private = b64url_decode(AS_PRIVATE_B64).unwrap();
@@ -772,7 +780,10 @@ mod tests {
     #[test]
     fn config_parses_tom_default() {
         let cfg: PushConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg.subject, "mailto:netfyr@localhost");
+        assert_eq!(
+            cfg.subject,
+            "https://github.com/mattiaskallman/netfyr-server"
+        );
         assert!(cfg.subscriptions.is_empty());
     }
 
@@ -864,7 +875,10 @@ mod tests {
 
     #[test]
     fn config_default_har_giltigt_vapid_subject() {
-        assert_eq!(PushConfig::default().subject, "mailto:netfyr@localhost");
+        assert_eq!(
+            PushConfig::default().subject,
+            "https://github.com/mattiaskallman/netfyr-server"
+        );
     }
 
     #[test]

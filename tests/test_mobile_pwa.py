@@ -191,11 +191,14 @@ class ConnectionStateTests(unittest.TestCase):
 class PushHandlerTests(unittest.TestCase):
     def test_service_worker_handles_push_and_click(self):
         worker = (WEB / "service-worker.js").read_text(encoding="utf-8")
+        app = (WEB / "app.js").read_text(encoding="utf-8")
 
         self.assertIn('self.addEventListener("push"', worker)
         self.assertIn("showNotification", worker)
         self.assertIn('self.addEventListener("notificationclick"', worker)
         self.assertIn("openWindow", worker)
+        self.assertIn("setAppBadge", worker)
+        self.assertIn("clearAppBadge", app)
         # Parse-fel får inte ge tyst svikt — generisk fallback måste finnas.
         self.assertIn("catch", worker)
         # Notisdata renderas av OS:et via showNotification — aldrig via DOM.

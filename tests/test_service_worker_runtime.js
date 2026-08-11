@@ -6,9 +6,17 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function loadWorker() {
+function loadWorker({ withBadgeApi = true } = {}) {
   const handlers = {};
-  const calls = { fetch: 0, cacheOpen: 0, cacheMatch: 0, cachePut: 0, notifications: [], opened: [] };
+  const calls = {
+    fetch: 0,
+    cacheOpen: 0,
+    cacheMatch: 0,
+    cachePut: 0,
+    notifications: [],
+    opened: [],
+    badgesSet: 0,
+  };
   let fetchImpl = async () => ({ ok: true, clone() { return this; } });
   let lastWaitUntil = null;
 
@@ -25,6 +33,9 @@ function loadWorker() {
   };
   const self = {
     location: { origin: "https://netfyr.test" },
+    navigator: withBadgeApi ? {
+      async setAppBadge() { calls.badgesSet += 1; },
+    } : {},
     clients: {
       async claim() {},
       async matchAll() { return []; },
@@ -103,7 +114,15 @@ async function main() {
   for (const [url, options] of bypass) {
     assert.equal(worker.dispatch(url, options), null, `${url} must bypass respondWith`);
   }
-  assert.deepEqual(worker.calls, { fetch: 0, cacheOpen: 0, cacheMatch: 0, cachePut: 0, notifications: [], opened: [] });
+  assert.deepEqual(worker.calls, {
+    fetch: 0,
+    cacheOpen: 0,
+    cacheMatch: 0,
+    cachePut: 0,
+    notifications: [],
+    opened: [],
+    badgesSet: 0,
+  });
 
   const staticResponse = worker.dispatch("https://netfyr.test/style.css");
   assert.ok(staticResponse, "allowlisted static file must use respondWith");
@@ -131,6 +150,7 @@ async function main() {
   assert.equal(worker.calls.notifications[0].title, "brandlarm-server — NER");
   assert.equal(worker.calls.notifications[0].options.body, "svarar inte på ping");
   assert.equal(worker.calls.notifications[0].options.data.url, "/");
+  assert.equal(worker.calls.badgesSet, 1, "push must set the installed app badge");
 
   // Upp-larm visas som UPP.
   await worker.dispatchPush({ device: "switch-1", status: "up", message: "", address: "10.0.0.6" });
@@ -141,6 +161,12 @@ async function main() {
   await worker.dispatchBrokenPush();
   assert.equal(worker.calls.notifications.length, 3);
   assert.equal(worker.calls.notifications[2].title, "NetFyr — NER");
+
+  // Äldre webbläsare utan Badging API ska fortfarande få själva notisen.
+  const noBadgeWorker = loadWorker({ withBadgeApi: false });
+  await noBadgeWorker.dispatchPush({ device: "legacy", status: "down", message: "larm" });
+  assert.equal(noBadgeWorker.calls.notifications.length, 1);
+  assert.equal(noBadgeWorker.calls.badgesSet, 0);
 
   // Klick på notisen öppnar appen när inget fönster finns.
   await worker.dispatchClick({ data: { url: "/" } });

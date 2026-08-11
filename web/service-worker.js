@@ -1,7 +1,7 @@
 // NetFyr PWA — cachar endast det statiska appskalet.
 // API-anrop lämnas helt till webbläsarens nätverksstack: operativ status får
 // aldrig ersättas med ett gammalt cachesvar som ser aktuellt ut.
-const CACHE_NAME = "netfyr-shell-v1";
+const CACHE_NAME = "netfyr-shell-v2";
 const SHELL = [
   "/",
   "/style.css",
@@ -83,16 +83,18 @@ self.addEventListener("push", (event) => {
   const body = typeof data.message === "string" && data.message
     ? data.message
     : (typeof data.address === "string" ? data.address : "");
-  event.waitUntil(
-    self.registration.showNotification(title, {
-      body,
-      icon: "/icon-192.png",
-      badge: "/icon-192.png",
-      tag: `netfyr-${device}`,
-      renotify: true,
-      data: { url: "/" },
-    }),
-  );
+  const notification = self.registration.showNotification(title, {
+    body,
+    icon: "/icon-192.png",
+    badge: "/icon-192.png",
+    tag: `netfyr-${device}`,
+    renotify: true,
+    data: { url: "/" },
+  });
+  const appBadge = typeof self.navigator?.setAppBadge === "function"
+    ? self.navigator.setAppBadge().catch(() => {})
+    : Promise.resolve();
+  event.waitUntil(Promise.all([notification, appBadge]));
 });
 
 self.addEventListener("notificationclick", (event) => {

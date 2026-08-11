@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 VERIFY = ROOT / "scripts" / "verify-release.sh"
-ARCHIVE_ROOT = "netfyr-server-v1.2.0-linux-amd64"
+ARCHIVE_ROOT = "netfyr-server-v1.2.1-linux-amd64"
 
 
 class ReleaseVerifierSecurityTests(unittest.TestCase):
