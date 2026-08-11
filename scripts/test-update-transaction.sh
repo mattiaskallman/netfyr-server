@@ -36,7 +36,7 @@ setup_case() {
   printf 'new-web\n' >"$stage/web/index.html"
   cp deploy/install-package.sh deploy/update-package.sh "$stage/deploy/"
   chmod 0755 "$stage/deploy/install-package.sh" "$stage/deploy/update-package.sh"
-  cp deploy/netfyr-release.func "$stage/deploy/netfyr-release.func"
+  cp deploy/netfyr-release.func deploy/netfyr-health.func "$stage/deploy/"
   cp deploy/netfyr.service "$stage/deploy/netfyr.service"
   cp config.example.toml "$stage/config.example.toml"
   cp LICENSE "$stage/LICENSE"

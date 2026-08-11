@@ -13,6 +13,8 @@ case "${NETFYR_ARCH:-$(dpkg --print-architecture 2>/dev/null || uname -m)}" in
   *) echo "Unsupported architecture" >&2; exit 1 ;;
 esac
 
+./scripts/test-pwa.sh
+./scripts/test-release-chain.sh
 cargo test --locked
 cargo build --release --locked
 
@@ -35,6 +37,7 @@ install -m 0644 config.example.toml "$package/config.example.toml"
 install -m 0644 deploy/netfyr.service "$package/deploy/netfyr.service"
 install -m 0755 deploy/install-package.sh "$package/deploy/install-package.sh"
 install -m 0755 deploy/update-package.sh "$package/deploy/update-package.sh"
+install -m 0644 deploy/netfyr-health.func "$package/deploy/netfyr-health.func"
 install -m 0644 deploy/netfyr-release.func "$package/deploy/netfyr-release.func"
 install -m 0644 LICENSE README.md "$package/"
 printf '%s\n' "$version" >"$package/VERSION"

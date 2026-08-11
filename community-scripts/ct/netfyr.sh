@@ -7,8 +7,8 @@
 NETFYR_CS_REF="4c9bb2636d0ebecef074c3661b170a3496d9cb37"
 NETFYR_CS_BASE="https://raw.githubusercontent.com/community-scripts/ProxmoxVED/${NETFYR_CS_REF}"
 NETFYR_BUILD_FUNC_SHA256="85908170cfb8d0dff244a354822b380be7ec335c792ea7fbe7a11bd2ec72cf00"
-NETFYR_SCRIPT_REF="v1.0.2"
-NETFYR_INSTALL_SHA256="1ef332061bd0fa7acc11efc4c2b3e29febde41e515f75a6ac91cc43e1f45c064"
+NETFYR_SCRIPT_REF="v1.2.0"
+NETFYR_INSTALL_SHA256="a2f0f8bbea140672b0c71cc14a4a6e5fee3b9f8942bd52e75e55b69471adbb1f"
 
 # build.func sources additional helpers immediately, so pin its base URL
 # before sourcing it. Otherwise those helpers would still come from main.
@@ -26,7 +26,7 @@ else
   rm -f "$_netfyr_build_func"
 fi
 
-# Standalone mode routes only NetFyr's installer to the immutable v1.0.2 tag.
+# Standalone mode routes only NetFyr's installer to the immutable v1.2.0 tag.
 eval "$(declare -f _cs_fetch_text | sed '1s/_cs_fetch_text/_netfyr_upstream_fetch_text/')"
 _cs_fetch_text() {
   if [[ "$1" == "install/netfyr-install.sh" ]]; then
@@ -84,7 +84,7 @@ function update_script() {
     msg_error "Could not determine a valid container IPv4 address"
     exit 1
   fi
-  if ! curl -kfsS "https://${LOCAL_IP}/api/health" >/dev/null; then
+  if ! curl --connect-timeout 2 --max-time 3 -kfsS "https://${LOCAL_IP}/api/health" >/dev/null; then
     msg_error "Existing NetFyr HTTPS health check failed; update aborted before changes"
     exit 1
   fi
@@ -107,7 +107,7 @@ function update_script() {
   fi
 
   msg_info "Installing verified NetFyr v${NETFYR_FETCHED_VERSION} transactionally"
-  if ! /opt/netfyr/deploy/update-package.sh "$stage" "$NETFYR_FETCHED_VERSION" "$LOCAL_IP"; then
+  if ! "$stage/deploy/update-package.sh" "$stage" "$NETFYR_FETCHED_VERSION" "$LOCAL_IP"; then
     msg_error "Update failed; see rollback result above"
     exit 1
   fi

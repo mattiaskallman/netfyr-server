@@ -256,6 +256,13 @@ pub async fn set_channel(
         let lang = crate::i18n::load_db(&state.db).await;
         return Err(ApiError::bad_request(crate::i18n::config_not_object(lang)));
     }
+    if name == "push" {
+        let lang = crate::i18n::load_db(&state.db).await;
+        let cfg: crate::channels::push::PushConfig = serde_json::from_value(body.clone())
+            .map_err(|_| ApiError::bad_request(crate::i18n::push_bad_config(lang)))?;
+        crate::channels::push::validate_vapid_subject(&cfg.subject)
+            .map_err(|_| ApiError::bad_request(crate::i18n::push_bad_config(lang)))?;
+    }
     let key = format!("channel.{name}.config");
     let value = body.to_string();
     state

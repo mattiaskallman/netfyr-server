@@ -10,14 +10,14 @@
 // =====================================================================
 
 use axum::{
-    extract::{ConnectInfo, Extension, Path, State},
     Json,
+    extract::{ConnectInfo, Extension, Path, State},
 };
 use serde::Serialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use super::{audit, ApiError};
+use super::{ApiError, audit};
 use crate::auth::AuthUser;
 use crate::channels::{self, AlarmPayload};
 use crate::routes::AppState;
@@ -40,7 +40,7 @@ pub async fn test(
 
     // Kända kanaler — samma lista som dispatchen i channels/mod.rs.
     let lang = crate::i18n::load_db(&state.db).await;
-    if !["webhook", "smtp", "mqtt", "sms"].contains(&name.as_str()) {
+    if !["webhook", "smtp", "mqtt", "sms", "push"].contains(&name.as_str()) {
         return Err(ApiError::bad_request(crate::i18n::unknown_channel(lang)));
     }
 
@@ -52,7 +52,9 @@ pub async fn test(
                 use rusqlite::OptionalExtension;
                 let key = format!("channel.{name}.config");
                 let v: Option<String> = conn
-                    .query_row("SELECT value FROM settings WHERE key = ?1", [&key], |r| r.get(0))
+                    .query_row("SELECT value FROM settings WHERE key = ?1", [&key], |r| {
+                        r.get(0)
+                    })
                     .optional()?;
                 Ok(v.unwrap_or_else(|| "{}".to_string()))
             }
@@ -72,13 +74,29 @@ pub async fn test(
     })
     .map_err(anyhow::Error::from)?;
 
-    let result = channels::send(&name, &payload, &config, &state.secrets, lang).await;
+    let result = channels::send(&name, &payload, &config, &state.secrets, &state.db, lang).await;
 
-    audit::record(&state.db, &actor_name, "test_channel", Some(&name), None, Some(&ip)).await;
+    audit::record(
+        &state.db,
+        &actor_name,
+        "test_channel",
+        Some(&name),
+        None,
+        Some(&ip),
+    )
+    .await;
 
     match result {
-        Ok(()) => Ok(Json(TestResult { ok: true, error: None })),
-        Err(e) => Ok(Json(TestResult { ok: false, error: Some(format!("{e:#}")) })),
+        channels::SendOutcome::Delivered => Ok(Json(TestResult {
+            ok: true,
+            error: None,
+        })),
+        channels::SendOutcome::Retryable(e) | channels::SendOutcome::Terminal(e) => {
+            Ok(Json(TestResult {
+                ok: false,
+                error: Some(format!("{e:#}")),
+            }))
+        }
     }
 }
 
@@ -133,7 +151,15 @@ pub async fn sms_verify(
     let password = state.secrets.get("sms").unwrap_or_default();
     let lang = crate::i18n::load_db(&state.db).await;
     let result = crate::channels::sms::verify(&config, &password, lang).await;
-    audit::record(&state.db, &user.username, "sms_verify", None, None, Some(&addr.ip().to_string())).await;
+    audit::record(
+        &state.db,
+        &user.username,
+        "sms_verify",
+        None,
+        None,
+        Some(&addr.ip().to_string()),
+    )
+    .await;
     Ok(Json(result))
 }
 

@@ -15,6 +15,7 @@
 // =====================================================================
 
 const POLL_MS = 5000;
+const REFRESH_TIMEOUT_MS = 8000;
 
 const $ = (id) => document.getElementById(id);
 const t = I18N.t;
@@ -23,33 +24,141 @@ const t = I18N.t;
 // utan svar där visas inloggningen i stället för gränssnittet.
 let me = null;
 
-const api = {
-  async get(path) {
-    const r = await fetch(`/api${path}`);
-    if (r.status === 401) { showLogin(); throw new Error(t("login.notLoggedIn")); }
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
-    return r.json();
-  },
-  async send(method, path, body) {
-    const r = await fetch(`/api${path}`, {
+// Stale anrop avvisas med en särskild typ. Varje catch kan då avsluta
+// utan DOM-mutation samtidigt som Promise-kedjan frigörs normalt.
+class StaleSessionError extends Error {
+  constructor() {
+    super("Stale session");
+    this.name = "StaleSessionError";
+  }
+}
+const isStaleSession = (err) => err instanceof StaleSessionError;
+const rethrowStale = (err) => { if (isStaleSession(err)) throw err; };
+window.addEventListener("unhandledrejection", (event) => {
+  if (isStaleSession(event.reason)) event.preventDefault();
+});
+
+function unboundAuthPath(path) {
+  return path === "/auth/login" || path === "/auth/logout" || path === "/auth/me";
+}
+
+async function apiRequest(method, path, body, options = {}) {
+  const sessionBound = !unboundAuthPath(path);
+  const generation = options.generation ?? sessionGeneration;
+  const ownerSignal = sessionController.signal;
+  const requestedSignal = options.signal;
+  const signal = requestedSignal ?? (sessionBound ? ownerSignal : undefined);
+  const stale = () => sessionBound && (
+    generation !== sessionGeneration || ownerSignal.aborted || !me
+  );
+  const staleResult = () => {
+    throw new StaleSessionError();
+  };
+
+  let r;
+  try {
+    r = await fetch(`/api${path}`, {
       method,
-      headers: { "Content-Type": "application/json" },
+      headers: method === "GET" ? undefined : { "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     });
-    if (r.status === 401) { showLogin(); throw new Error(t("login.notLoggedIn")); }
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
-    return r.status === 204 ? null : r.json().catch(() => null);
+  } catch (err) {
+    if (isStaleSession(err)) return;
+    if (stale()) return staleResult();
+    throw err;
+  }
+  if (stale()) return staleResult();
+  if (r.status === 401) {
+    // Logout är idempotent. Ett sent 401-svar från den gamla sessionen
+    // får aldrig logga ut en ny session lokalt.
+    if (path === "/auth/logout") return null;
+    if (path === "/auth/login") throw new Error(t("login.notLoggedIn"));
+    showLogin();
+    if (sessionBound) return staleResult();
+    throw new Error(t("login.notLoggedIn"));
+  }
+  if (!r.ok) {
+    const payload = await r.json().catch(() => ({}));
+    if (stale()) return staleResult();
+    throw new Error(payload.error || `HTTP ${r.status}`);
+  }
+  if (r.status === 204) return null;
+  const payload = await r.json().catch(() => null);
+  if (stale()) return staleResult();
+  return payload;
+}
+
+const api = {
+  async get(path, options = {}) {
+    return apiRequest("GET", path, undefined, options);
+  },
+  async send(method, path, body, options = {}) {
+    return apiRequest(method, path, body, options);
   },
 };
 
 // ---- Inloggning -------------------------------------------------------
 
 let pollTimer = null;
+let refreshCoordinator = null;
+let sessionController = new AbortController();
+let sessionGeneration = 0;
+let pendingLogoutController = null;
+
+function clearSessionState() {
+  overview = null;
+  groupsCache = [];
+  settingsCache = null;
+  smsDirty = false;
+
+  $("sms-gateway-status").replaceChildren();
+  delete $("sms-gateway-status").dataset.loaded;
+  $("sms-sessions").replaceChildren();
+  $("sms-verify-result").replaceChildren();
+  $("sms-verify-result").hidden = true;
+  $("nh-group").replaceChildren();
+  $("mw-group").replaceChildren();
+  $("mw-hosts-wrap").replaceChildren();
+
+  for (const id of [
+    "tally", "ov-group-filters", "host-rows", "stats-rows", "stats-events",
+    "events", "deliveries", "device-rows", "group-rows", "mw-rows",
+    "sec-list", "user-rows", "audit",
+  ]) {
+    $(id).replaceChildren();
+  }
+  for (const id of [
+    "user-name", "user-role", "last-sweep", "rail-sweep", "head-live",
+    "verdict-state", "verdict-detail", "engine-state", "engine-hosts",
+    "engine-alarms", "sms-rail-state", "sms-rail-op", "sms-rail-signal",
+  ]) {
+    $(id).textContent = "";
+  }
+  document.querySelectorAll(".msg").forEach((el) => {
+    el.replaceChildren();
+    el.className = "msg";
+  });
+  document.querySelectorAll("#view-settings input, #view-settings textarea, #view-account input")
+    .forEach((el) => {
+      if (el.type === "checkbox" || el.type === "radio") el.checked = false;
+      else el.value = "";
+    });
+  document.querySelectorAll("#view-settings .toggle.on").forEach((el) => el.classList.remove("on"));
+  $("connection-banner").hidden = true;
+  $("verdict").className = "verdict idle";
+  $("card-engine").className = "rail-card";
+  $("card-sms").className = "rail-card";
+}
 
 function showLogin() {
   me = null;
+  sessionGeneration += 1;
+  sessionController.abort();
+  refreshCoordinator?.abort();
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   if (smsRailTimer) { clearInterval(smsRailTimer); smsRailTimer = null; }
+  clearSessionState();
   $("card-sms").hidden = true;
   $("login").hidden = false;
   $("login-pass").value = "";
@@ -71,6 +180,7 @@ $("login-form").addEventListener("submit", async (e) => {
     hideLogin();
     startApp();
   } catch (err) {
+    if (isStaleSession(err)) return;
     flash($("login-msg"), String(err.message), false);
   } finally {
     btn.disabled = false;
@@ -78,8 +188,16 @@ $("login-form").addEventListener("submit", async (e) => {
 });
 
 $("btn-logout").addEventListener("click", async () => {
-  await api.send("POST", "/auth/logout").catch(() => {});
+  const controller = new AbortController();
+  pendingLogoutController?.abort();
+  pendingLogoutController = controller;
+  const timeout = setTimeout(() => controller.abort(), 3000);
+  const logoutRequest = api.send("POST", "/auth/logout", undefined, { signal: controller.signal })
+    .catch(() => {});
   showLogin();
+  await logoutRequest;
+  clearTimeout(timeout);
+  if (pendingLogoutController === controller) pendingLogoutController = null;
 });
 
 // ---- Rollstyrning -------------------------------------------------------
@@ -92,7 +210,10 @@ function applyRole() {
   $("user-name").textContent = me.username;
   $("user-role").textContent = me.role;
   const isAdmin = me.role === "admin";
+  $("push-toggle").hidden = !isAdmin;
+  $("push-test").hidden = !isAdmin;
   $("nav-settings").hidden = !isAdmin;
+  $("mobile-nav-settings").hidden = !isAdmin;
   $("chip-users").hidden = !isAdmin;
   $("tg-live").disabled = !isAdmin;
   $("tg-alarms").disabled = !isAdmin;
@@ -115,15 +236,33 @@ async function boot() {
 }
 
 function startApp() {
+  pendingLogoutController?.abort();
+  pendingLogoutController = null;
+  sessionController.abort();
+  sessionController = new AbortController();
+  sessionGeneration += 1;
+  pushStatusCache = null;
+  pushSubscriptionCache = null;
+  const generation = sessionGeneration;
+  const signal = sessionController.signal;
   applyRole();
   if (!pollTimer) pollTimer = setInterval(refresh, POLL_MS);
   refresh();
   // Versionen i sidopanelen
-  api.get("/health").then((h) => { $("version").textContent = `v${h.version}`; }).catch(() => {});
+  api.get("/health", { signal }).then((h) => {
+    if (generation !== sessionGeneration || !me) return;
+    $("version").textContent = `v${h.version}`;
+  }).catch(() => {});
   // Globala gränssnittsinställningar (bl.a. SMS-rutan i sidopanelen).
   // Läsbar för båda rollerna — det är bara skrivandet som kräver admin.
-  api.get("/settings").then((s) => { settingsCache = s; applyRailVisibility(); }).catch(() => {});
-  if (!smsRailTimer) smsRailTimer = setInterval(loadSmsRail, SMS_RAIL_MS);
+  api.get("/settings", { signal }).then((s) => {
+    if (generation !== sessionGeneration || !me) return;
+    settingsCache = s;
+    applyRailVisibility();
+  }).catch(() => {});
+  if (!smsRailTimer) {
+    smsRailTimer = setInterval(() => loadSmsRail().catch(() => {}), SMS_RAIL_MS);
+  }
 }
 
 // ---- Formatering -----------------------------------------------------
@@ -164,13 +303,25 @@ function since(ms) {
 }
 
 function flash(el, text, ok = true) {
+  const generation = sessionGeneration;
   el.textContent = text;
   el.className = `msg ${ok ? "ok" : "bad"}`;
   setTimeout(() => {
+    if (generation !== sessionGeneration || el.textContent !== text) return;
     el.textContent = "";
     el.className = "msg";
   }, 4000);
 }
+
+/** Visar anslutningsförlust utan att sudda ut den senaste kända statusen.
+ *  Operatören får fortfarande orientera sig, men kan aldrig misstolka den
+ *  frysta bilden som en aktuell serverstatus. */
+function setConnectionState(connected) {
+  $("connection-banner").hidden = connected;
+}
+
+window.addEventListener("offline", () => setConnectionState(false));
+window.addEventListener("online", () => refresh());
 
 // ---- Vyer och flikar -------------------------------------------------
 
@@ -255,7 +406,7 @@ function applyLanguage() {
   renderWeekdayBoxes();
   if (view === "settings") $("settings-title").textContent = tabTitle(tab);
   refresh();
-  loadSmsRail();
+  loadSmsRail().catch(() => {});
   if (view === "stats") loadStats();
 }
 
@@ -525,7 +676,7 @@ function esc(s) {
 document.addEventListener("click", async (e) => {
   const ack = e.target.closest("[data-ack]");
   if (ack) {
-    await api.send("POST", `/hosts/${ack.dataset.ack}/ack`).catch(() => {});
+    await api.send("POST", `/hosts/${ack.dataset.ack}/ack`).catch((err) => { rethrowStale(err); });
     refresh();
     return;
   }
@@ -533,14 +684,14 @@ document.addEventListener("click", async (e) => {
   if (sn) {
     const host = overview?.hosts.find((h) => String(h.id) === sn.dataset.snooze);
     const minutes = host?.snoozeUntil ? 0 : 60;
-    await api.send("POST", `/hosts/${sn.dataset.snooze}/snooze`, { minutes }).catch(() => {});
+    await api.send("POST", `/hosts/${sn.dataset.snooze}/snooze`, { minutes }).catch((err) => { rethrowStale(err); });
     refresh();
     return;
   }
   const del = e.target.closest("[data-del]");
   if (del) {
     if (!confirm(t("dash.confirmDeleteHost"))) return;
-    await api.send("DELETE", `/hosts/${del.dataset.del}`).catch(() => {});
+    await api.send("DELETE", `/hosts/${del.dataset.del}`).catch((err) => { rethrowStale(err); });
     refresh();
   }
 });
@@ -699,6 +850,7 @@ document.addEventListener("click", async (e) => {
     flash(msg, t("common.saved"));
     refresh();
   } catch (err) {
+    if (isStaleSession(err)) return;
     flash(msg, String(err.message), false);
   }
 });
@@ -707,7 +859,7 @@ document.addEventListener("click", async (e) => {
   const tg = e.target.closest("[data-toggle]");
   if (!tg) return;
   const on = tg.dataset.on === "true";
-  await api.send("PATCH", `/hosts/${tg.dataset.toggle}`, { enabled: !on }).catch(() => {});
+  await api.send("PATCH", `/hosts/${tg.dataset.toggle}`, { enabled: !on }).catch((err) => { rethrowStale(err); });
   refresh();
 });
 
@@ -733,6 +885,7 @@ $("nh-add").addEventListener("click", async () => {
     flash($("nh-msg"), t("settings.devices.added"));
     refresh();
   } catch (err) {
+    if (isStaleSession(err)) return;
     flash($("nh-msg"), String(err.message), false);
   }
 });
@@ -794,12 +947,17 @@ document.querySelectorAll("#stats-windows .chip").forEach((c) => {
 
 $("stats-refresh").addEventListener("click", loadStats);
 
-async function loadStats() {
+async function loadStats(signal = sessionController.signal, generation = sessionGeneration) {
+  if (!me) return;
   const rowsBox = $("stats-rows");
   rowsBox.innerHTML = `<p class="empty" style="padding:22px">${t("stats.loading")}</p>`;
   try {
-    renderStats(await api.get(`/stats?window=${statsWindow}`));
+    const stats = await api.get(`/stats?window=${statsWindow}`, { signal });
+    if (signal.aborted || generation !== sessionGeneration || !me) return;
+    renderStats(stats);
   } catch (err) {
+    if (isStaleSession(err)) return;
+    if (signal.aborted || generation !== sessionGeneration || !me) return;
     rowsBox.innerHTML = `<p class="empty" style="padding:22px">${esc(String(err.message))}</p>`;
   }
 }
@@ -904,6 +1062,7 @@ $("stats-clear").addEventListener("click", async () => {
     alert(t("stats.cleared", { n: r.removed }));
     loadStats();
   } catch (err) {
+    if (isStaleSession(err)) return;
     alert(String(err.message));
   }
 });
@@ -961,6 +1120,7 @@ $("st-save").addEventListener("click", async () => {
     });
     flash($("st-msg"), t("common.saved"));
   } catch (err) {
+    if (isStaleSession(err)) return;
     flash($("st-msg"), String(err.message), false);
   }
 });
@@ -999,6 +1159,7 @@ $("gr-add").addEventListener("click", async () => {
     flash($("gr-msg"), t("settings.groups.created"));
     refresh();
   } catch (err) {
+    if (isStaleSession(err)) return;
     flash($("gr-msg"), String(err.message), false);
   }
 });
@@ -1007,7 +1168,7 @@ document.addEventListener("click", async (e) => {
   const d = e.target.closest("[data-grdel]");
   if (!d) return;
   if (!confirm(t("settings.groups.confirmDelete"))) return;
-  await api.send("DELETE", `/groups/${d.dataset.grdel}`).catch(() => {});
+  await api.send("DELETE", `/groups/${d.dataset.grdel}`).catch((err) => { rethrowStale(err); });
   refresh();
 });
 
@@ -1071,6 +1232,7 @@ $("mw-add").addEventListener("click", async () => {
     flash($("mw-msg"), t("settings.maint.added"));
     refresh();
   } catch (err) {
+    if (isStaleSession(err)) return;
     flash($("mw-msg"), String(err.message), false);
   }
 });
@@ -1109,7 +1271,7 @@ function renderMaintenance(windows, hosts, groups) {
         w.targetKind === "all"
           ? t("settings.maint.targetAll")
           : w.targetKind === "group"
-            ? t("settings.maint.rowGroup", { name: w.group ?? "?" })
+            ? t("settings.maint.rowGroup", { name: esc(String(w.group ?? "?")) })
             : t("settings.maint.rowHosts", { n: w.hostIds.length });
       const schedule =
         w.kind === "once"
@@ -1141,13 +1303,13 @@ document.addEventListener("click", async (e) => {
       .send("PATCH", `/maintenance/${tg.dataset.mwtoggle}`, {
         enabled: tg.dataset.on !== "true",
       })
-      .catch(() => {});
+      .catch((err) => { rethrowStale(err); });
     refresh();
     return;
   }
   const d = e.target.closest("[data-mwdel]");
   if (d) {
-    await api.send("DELETE", `/maintenance/${d.dataset.mwdel}`).catch(() => {});
+    await api.send("DELETE", `/maintenance/${d.dataset.mwdel}`).catch((err) => { rethrowStale(err); });
     refresh();
   }
 });
@@ -1250,7 +1412,7 @@ async function setChannelActive(name, on) {
   await api.send("PUT", "/settings", { channels: [...current].join(", ") });
 }
 
-async function renderChannels(settings, secretNames) {
+async function renderChannels(settings, secretNames, signal) {
   settingsCache = settings;
 
   for (const name of CHANNELS) {
@@ -1262,7 +1424,7 @@ async function renderChannels(settings, secretNames) {
     // Hämta kanalens konfiguration (admin-endpoint).
     let configured = hasSecret;
     try {
-      const cfg = await api.get(`/channels/${name}/config`);
+      const cfg = await api.get(`/channels/${name}/config`, { signal });
       configured = configured || Object.keys(cfg).length > 0;
       // Fyll bara i fält om ingen skriver i dem just nu.
       if (document.activeElement?.tagName !== "INPUT") {
@@ -1299,7 +1461,9 @@ async function renderChannels(settings, secretNames) {
           paintSmsToggles();
         }
       }
-    } catch {
+    } catch (err) {
+    if (isStaleSession(err)) return;
+      if (signal.aborted) throw err;
       /* saknar behörighet eller kanal — lämna fälten */
     }
     $(`${p}-status`).textContent = configured ? t("common.configured") : t("common.notConfigured");
@@ -1318,6 +1482,7 @@ for (const name of CHANNELS) {
       await setChannelActive(name, !channelActive(name));
       refresh();
     } catch (err) {
+    if (isStaleSession(err)) return;
       flash($(`${p}-msg`), String(err.message), false);
     }
   });
@@ -1336,6 +1501,7 @@ for (const name of CHANNELS) {
       flash($(`${p}-msg`), t("common.saved"));
       refresh();
     } catch (err) {
+    if (isStaleSession(err)) return;
       flash($(`${p}-msg`), String(err.message), false);
     }
   });
@@ -1348,46 +1514,206 @@ for (const name of CHANNELS) {
       const r = await api.send("POST", `/channels/${name}/test`);
       flash(msg, r.ok ? t("settings.ch.testOk") : t("settings.ch.testFail", { error: r.error }), r.ok);
     } catch (err) {
+    if (isStaleSession(err)) return;
       flash(msg, String(err.message), false);
     }
   });
 }
+
+// ---- Pushnotiser -------------------------------------------------------
+// Push är en kanal utan serverformulär: dess "konfiguration" är de
+// prenumerationer som varje enhet registrerar själv via PushManager.
+// Kanaltoggeln (admin) går via /push/enable|disable — inte via den
+// generiska setChannelActive, eftersom aktiveringen även skapar
+// VAPID-nyckelparet.
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
+let pushStatusCache = null;
+let pushSubscriptionCache = null;
+
+/** Den här enhetens lokala prenumeration, om någon. */
+async function localPushSubscription() {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) return null;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    return await reg.pushManager.getSubscription();
+  } catch {
+    return null;
+  }
+}
+
+async function renderPush(signal) {
+  const generation = sessionGeneration;
+  let status;
+  try {
+    status = await api.get("/push/status", { signal });
+  } catch (err) {
+    if (signal.aborted) throw err;
+    return; // äldre server utan push-API — lämna kortet i default
+  }
+  if (!status || signal.aborted || generation !== sessionGeneration || !me) return;
+  pushStatusCache = status;
+  $("push-toggle").classList.toggle("on", status.enabled);
+  $("push-status").textContent = status.enabled
+    ? t("settings.ch.pushSubCount", { n: status.subscriptions })
+    : t("common.notConfigured");
+
+  const sub = await localPushSubscription();
+  if (signal.aborted || generation !== sessionGeneration || !me) return;
+  pushSubscriptionCache = sub;
+  $("push-device").textContent = sub
+    ? t("settings.ch.pushDeviceOff")
+    : t("settings.ch.pushDeviceOn");
+  $("push-subinfo").textContent = sub ? t("settings.ch.pushThisDevice") : "";
+}
+
+$("push-toggle").addEventListener("click", async () => {
+  const msg = $("push-msg");
+  const signal = sessionController.signal;
+  const generation = sessionGeneration;
+  try {
+    const on = $("push-toggle").classList.contains("on");
+    await api.send("POST", on ? "/push/disable" : "/push/enable");
+    if (signal.aborted || generation !== sessionGeneration || !me) return;
+    flash(msg, t("common.saved"));
+    refresh();
+  } catch (err) {
+    if (isStaleSession(err) || signal.aborted || generation !== sessionGeneration || !me) return;
+    flash(msg, String(err.message), false);
+  }
+});
+
+$("push-device").addEventListener("click", async () => {
+  const msg = $("push-msg");
+  const signal = sessionController.signal;
+  const generation = sessionGeneration;
+  try {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      throw new Error(t("settings.ch.pushUnsupported"));
+    }
+
+    const existing = pushSubscriptionCache;
+    if (existing) {
+      // Avsluta serverposten först. Om nätanropet misslyckas finns den lokala
+      // capabilityn kvar så användaren kan försöka igen utan en orphan-post.
+      await api.send("DELETE", "/push/subscriptions", { endpoint: existing.endpoint }, { signal });
+      if (signal.aborted || generation !== sessionGeneration || !me) return;
+      await existing.unsubscribe();
+      if (signal.aborted || generation !== sessionGeneration || !me) return;
+      pushSubscriptionCache = null;
+      flash(msg, t("common.saved"));
+    } else {
+      // Statusen är förhämtad av renderPush. Inga await får ske före
+      // requestPermission(): iOS kräver obruten transient user activation.
+      const status = pushStatusCache;
+      if (!status?.enabled || !status.publicKey) {
+        throw new Error(t("settings.ch.pushNeedChannel"));
+      }
+      const permissionRequest = Notification.requestPermission();
+      const perm = await permissionRequest;
+      if (signal.aborted || generation !== sessionGeneration || !me) return;
+      if (perm !== "granted") throw new Error(t("settings.ch.pushDenied"));
+
+      const reg = await navigator.serviceWorker.ready;
+      if (signal.aborted || generation !== sessionGeneration || !me) return;
+      const sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(status.publicKey),
+      });
+      if (signal.aborted || generation !== sessionGeneration || !me) return;
+      const json = sub.toJSON();
+      const isIphone = /iPhone|iPad/.test(navigator.userAgent);
+      try {
+        await api.send("POST", "/push/subscriptions", {
+          endpoint: json.endpoint,
+          keys: { p256dh: json.keys.p256dh, auth: json.keys.auth },
+          label: `${isIphone ? "iPhone/iPad" : "Webbläsare"} — ${new Date().toLocaleDateString("sv-SE")}`,
+        }, { signal });
+      } catch (registerError) {
+        // Backend saknar posten: rulla tillbaka den lokala prenumerationen så
+        // UI:t aldrig kan visa ett falskt aktiverat läge. En ny session får
+        // däremot inte muteras av en gammal async continuation.
+        if (!signal.aborted && generation === sessionGeneration && me) {
+          await sub.unsubscribe().catch(() => false);
+          if (!signal.aborted && generation === sessionGeneration && me) {
+            pushSubscriptionCache = null;
+          }
+        }
+        throw registerError;
+      }
+      if (signal.aborted || generation !== sessionGeneration || !me) return;
+      pushSubscriptionCache = sub;
+      flash(msg, t("common.saved"));
+    }
+    refresh();
+  } catch (err) {
+    if (isStaleSession(err) || signal.aborted || generation !== sessionGeneration || !me) return;
+    flash(msg, String(err.message), false);
+  }
+});
+
+$("push-test").addEventListener("click", async () => {
+  const msg = $("push-msg");
+  const signal = sessionController.signal;
+  const generation = sessionGeneration;
+  msg.textContent = t("settings.ch.testing");
+  msg.className = "msg";
+  try {
+    const r = await api.send("POST", "/channels/push/test");
+    if (signal.aborted || generation !== sessionGeneration || !me) return;
+    flash(msg, r.ok ? t("settings.ch.testOk") : t("settings.ch.testFail", { error: r.error }), r.ok);
+  } catch (err) {
+    if (isStaleSession(err) || signal.aborted || generation !== sessionGeneration || !me) return;
+    flash(msg, String(err.message), false);
+  }
+});
 
 // ---- SMS: verifiering, gateway-status och sessioner -------------------
 // Speglar desktopens TrbChannelCard: behörighetskontrollen kostar inga
 // SMS, statusen läses på begäran, och sessionslistan visar eskaleringar.
 
 $("sms-verify").addEventListener("click", async () => {
+  const signal = sessionController.signal;
+  const generation = sessionGeneration;
   const box = $("sms-verify-result");
   box.hidden = false;
   box.innerHTML = `<span class="field-hint">${t("settings.ch.smsVerifying")}</span>`;
   try {
-    const v = await api.send("POST", "/channels/sms/verify");
+    const v = await api.send("POST", "/channels/sms/verify", undefined, { signal });
+    if (signal.aborted || generation !== sessionGeneration || !me) return;
     const row = (ok, label) =>
-      `<div class="verify-row"><span class="pill ${ok ? "ok" : "alarm"}">${ok ? "✓" : "✗"}</span> ${label}</div>`;
+      `<div class="verify-row"><span class="pill ${ok ? "ok" : "alarm"}">${ok ? "✓" : "✗"}</span> ${esc(String(label))}</div>`;
     box.innerHTML =
       row(v.loginOk, t("settings.ch.smsVerifyLogin")) +
       row(v.modemsOk, t("settings.ch.smsVerifyModems")) +
       row(v.messagesReadOk, t("settings.ch.smsVerifyRead")) +
       row(v.registered, t("settings.ch.smsVerifyRegistered")) +
-      (v.modemId ? `<div class="field-hint">${t("settings.ch.smsModemIdLabel", { id: v.modemId })}</div>` : "") +
-      (v.error ? `<div class="field-hint warn">${v.error}</div>` : "") +
+      (v.modemId ? `<div class="field-hint">${t("settings.ch.smsModemIdLabel", { id: esc(String(v.modemId)) })}</div>` : "") +
+      (v.error ? `<div class="field-hint warn">${esc(String(v.error))}</div>` : "") +
       (!v.messagesReadOk && v.loginOk
         ? `<div class="field-hint">${t("settings.ch.smsVerifyAclHint")}</div>`
         : "");
   } catch (err) {
-    box.innerHTML = `<span class="field-hint warn">${err.message}</span>`;
+    if (isStaleSession(err)) return;
+    if (signal.aborted || generation !== sessionGeneration || !me) return;
+    box.innerHTML = `<span class="field-hint warn">${esc(String(err.message))}</span>`;
   }
 });
 
 function renderSmsStatus(s) {
   const box = $("sms-gateway-status");
   if (s.error) {
-    box.innerHTML = `<span class="field-hint warn">${s.error}</span>`;
+    box.innerHTML = `<span class="field-hint warn">${esc(String(s.error))}</span>`;
     return;
   }
   const item = (label, value) =>
-    value == null || value === "" ? "" : `<div class="status-item"><span>${label}</span><b>${value}</b></div>`;
+    value == null || value === "" ? "" : `<div class="status-item"><span>${esc(String(label))}</span><b>${esc(String(value))}</b></div>`;
   box.innerHTML =
     item(t("settings.ch.smsStOperator"), s.operator) +
     item(t("settings.ch.smsStState"), s.operatorState) +
@@ -1399,15 +1725,21 @@ function renderSmsStatus(s) {
     `<span class="field-hint">${t("settings.ch.smsNoStatus")}</span>`;
 }
 
-async function loadSmsStatus() {
+async function loadSmsStatus(signal = sessionController.signal, generation = sessionGeneration) {
   try {
-    renderSmsStatus(await api.get("/channels/sms/status"));
-  } catch {
+    const status = await api.get("/channels/sms/status", { signal });
+    if (generation !== sessionGeneration || !me) return false;
+    renderSmsStatus(status);
+    return true;
+  } catch (err) {
+    if (isStaleSession(err)) return;
+    if (signal.aborted) throw err;
     /* saknar behörighet — lämna rutan */
+    return false;
   }
 }
 
-$("sms-refresh-status").addEventListener("click", loadSmsStatus);
+$("sms-refresh-status").addEventListener("click", () => loadSmsStatus().catch(() => {}));
 
 function renderSmsSessions(list) {
   const box = $("sms-sessions");
@@ -1420,17 +1752,17 @@ function renderSmsSessions(list) {
       const state = !s.closed
         ? `<span class="pill alarm">${t("settings.ch.sessOpen")}</span>`
         : s.closedReason === "ack"
-          ? `<span class="pill ok">${t("settings.ch.sessAck")}${s.ackedBy ? t("settings.ch.sessAckBy", { by: s.ackedBy }) : ""}</span>`
-          : `<span class="pill">${dictText(`settings.ch.sess${cap(s.closedReason)}`, t("settings.ch.sessClosed"))}</span>`;
+          ? `<span class="pill ok">${t("settings.ch.sessAck")}${s.ackedBy ? t("settings.ch.sessAckBy", { by: esc(String(s.ackedBy)) }) : ""}</span>`
+          : `<span class="pill">${esc(String(dictText(`settings.ch.sess${cap(s.closedReason)}`, t("settings.ch.sessClosed"))))}</span>`;
       const when = new Date(s.createdAt).toLocaleString(I18N.locale(), {
         month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
       });
       return `<div class="session-row">
-        <span class="session-device">${s.device}</span>
-        <span class="pill">[${s.id}]</span>
-        <span class="field-hint">${t("settings.ch.sessSent", { sent: s.sentCount, total: s.recipients.length })}</span>
+        <span class="session-device">${esc(String(s.device))}</span>
+        <span class="pill">[${esc(String(s.id))}]</span>
+        <span class="field-hint">${t("settings.ch.sessSent", { sent: esc(String(s.sentCount)), total: esc(String(s.recipients.length)) })}</span>
         ${state}
-        <span class="field-hint">${when}</span>
+        <span class="field-hint">${esc(String(when))}</span>
       </div>`;
     })
     .join("");
@@ -1440,17 +1772,23 @@ function cap(s) {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 }
 
-async function loadSmsExtras() {
+async function loadSmsExtras(signal, generation = sessionGeneration) {
   try {
-    renderSmsSessions(await api.get("/sms/sessions"));
-  } catch {
+    const sessions = await api.get("/sms/sessions", { signal });
+    if (generation !== sessionGeneration || !me) return;
+    renderSmsSessions(sessions);
+  } catch (err) {
+    if (isStaleSession(err)) return;
+    if (signal.aborted) throw err;
     /* icke-admin eller gammal server — lämna listan */
   }
   // Gateway-statusen hämtas bara om rutan ännu inte visar något —
   // annars får användaren trycka Uppdatera (samma som desktop).
   if ($("sms-gateway-status").dataset.loaded !== "1") {
-    await loadSmsStatus();
-    $("sms-gateway-status").dataset.loaded = "1";
+    const rendered = await loadSmsStatus(signal, generation);
+    if (rendered && generation === sessionGeneration && me) {
+      $("sms-gateway-status").dataset.loaded = "1";
+    }
   }
 }
 
@@ -1473,18 +1811,19 @@ function applyRailVisibility() {
   // direkt; det döljs först när inställningen säger annat.
   const sms = settingsCache != null && settingsCache.showSmsRail !== false;
   $("card-sms").hidden = !sms;
-  if (sms) loadSmsRail();
+  if (sms) loadSmsRail().catch(() => {});
   if (settingsCache != null) {
     $("card-engine").hidden = settingsCache.showEngineRail === false;
   }
 }
 
-async function loadSmsRail() {
+async function loadSmsRail(signal = sessionController.signal, generation = sessionGeneration) {
   const card = $("card-sms");
   if (card.hidden) return;
   const led = $("sms-led");
   try {
-    const s = await api.get("/channels/sms/status");
+    const s = await api.get("/channels/sms/status", { signal });
+    if (generation !== sessionGeneration || !me) return;
     if (s.error) throw new Error(s.error);
     led.className = "led online";
     card.className = "rail-card online";
@@ -1494,6 +1833,8 @@ async function loadSmsRail() {
     $("sms-rail-signal").textContent =
       s.signalQuality != null ? t("rail.smsSignal", { n: s.signalQuality }) : s.rssi != null ? `${s.rssi} dBm` : "";
   } catch (err) {
+    if (isStaleSession(err)) return;
+    if (signal.aborted || generation !== sessionGeneration || !me) return;
     const msg = String(err.message ?? "");
     led.className = "led offline";
     card.className = "rail-card offline";
@@ -1515,6 +1856,7 @@ $("ui-smsrail").addEventListener("click", async () => {
     $("ui-smsrail").classList.toggle("on", s.showSmsRail !== false);
     applyRailVisibility();
   } catch (err) {
+    if (isStaleSession(err)) return;
     alert(String(err.message));
   }
 });
@@ -1527,6 +1869,7 @@ $("ui-engrail").addEventListener("click", async () => {
     $("ui-engrail").classList.toggle("on", s.showEngineRail !== false);
     applyRailVisibility();
   } catch (err) {
+    if (isStaleSession(err)) return;
     alert(String(err.message));
   }
 });
@@ -1538,6 +1881,7 @@ $("server-lang").addEventListener("change", async () => {
     settingsCache = s;
     $("server-lang").value = s.lang === "en" ? "en" : "sv";
   } catch (err) {
+    if (isStaleSession(err)) return;
     alert(String(err.message));
   }
 });
@@ -1552,6 +1896,7 @@ $("st-slowalarm").addEventListener("click", async () => {
     settingsCache = s;
     $("st-slowalarm").classList.toggle("on", s.slowAlarm === true);
   } catch (err) {
+    if (isStaleSession(err)) return;
     alert(String(err.message));
   }
 });
@@ -1567,6 +1912,7 @@ $("wd-enabled").addEventListener("click", async () => {
     $("wd-enabled").classList.toggle("on", s.watchdogEnabled === true);
     $("wd-fields").hidden = s.watchdogEnabled !== true;
   } catch (err) {
+    if (isStaleSession(err)) return;
     alert(String(err.message));
   }
 });
@@ -1583,6 +1929,7 @@ $("wd-save").addEventListener("click", async () => {
     $("wd-grace").value = s.watchdogGraceMin;
     flash($("wd-msg"), t("common.saved"));
   } catch (err) {
+    if (isStaleSession(err)) return;
     flash($("wd-msg"), String(err.message), false);
   }
 });
@@ -1600,6 +1947,7 @@ $("xp-export").addEventListener("click", async () => {
     URL.revokeObjectURL(a.href);
     flash($("xp-msg"), t("settings.sys.exported"));
   } catch (err) {
+    if (isStaleSession(err)) return;
     flash($("xp-msg"), String(err.message), false);
   }
 });
@@ -1608,15 +1956,24 @@ $("xp-import").addEventListener("click", () => $("xp-file").click());
 $("xp-file").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   if (!file) return;
+  const signal = sessionController.signal;
+  const generation = sessionGeneration;
   try {
     const data = JSON.parse(await file.text());
-    const r = await api.send("POST", "/import", data);
+    if (signal.aborted || generation !== sessionGeneration || !me) return;
+    const r = await api.send("POST", "/import", data, { signal, generation });
+    if (signal.aborted || generation !== sessionGeneration || !me) return;
     flash($("xp-msg"), t("settings.sys.imported", { imported: r.imported, skipped: r.skipped }));
     refresh();
   } catch (err) {
+    if (isStaleSession(err)) return;
+    if (signal.aborted || generation !== sessionGeneration || !me) return;
     flash($("xp-msg"), String(err.message), false);
+  } finally {
+    if (!signal.aborted && generation === sessionGeneration && e.target.files[0] === file) {
+      e.target.value = "";
+    }
   }
-  e.target.value = "";
 });
 
 $("sec-save").addEventListener("click", async () => {
@@ -1632,6 +1989,7 @@ $("sec-save").addEventListener("click", async () => {
     flash($("sec-msg"), t("common.saved"));
     refresh();
   } catch (err) {
+    if (isStaleSession(err)) return;
     flash($("sec-msg"), String(err.message), false);
   }
 });
@@ -1639,7 +1997,7 @@ $("sec-save").addEventListener("click", async () => {
 document.addEventListener("click", async (e) => {
   const d = e.target.closest("[data-secdel]");
   if (!d) return;
-  await api.send("DELETE", `/secrets/${encodeURIComponent(d.dataset.secdel)}`).catch(() => {});
+  await api.send("DELETE", `/secrets/${encodeURIComponent(d.dataset.secdel)}`).catch((err) => { rethrowStale(err); });
   refresh();
 });
 
@@ -1698,6 +2056,7 @@ $("nu-add").addEventListener("click", async () => {
     flash($("nu-msg"), t("settings.users.created"));
     refresh();
   } catch (err) {
+    if (isStaleSession(err)) return;
     flash($("nu-msg"), String(err.message), false);
   }
 });
@@ -1705,7 +2064,7 @@ $("nu-add").addEventListener("click", async () => {
 document.addEventListener("click", async (e) => {
   const urole = e.target.closest("[data-urole]");
   if (urole) {
-    await api.send("PATCH", `/users/${urole.dataset.urole}`, { role: urole.dataset.role }).catch((err) => alert(err.message));
+    await api.send("PATCH", `/users/${urole.dataset.urole}`, { role: urole.dataset.role }).catch((err) => { rethrowStale(err); alert(err.message); });
     refresh();
     return;
   }
@@ -1713,21 +2072,21 @@ document.addEventListener("click", async (e) => {
   if (ureset) {
     const pw = prompt(t("settings.users.resetPrompt"));
     if (!pw) return;
-    await api.send("PATCH", `/users/${ureset.dataset.ureset}`, { password: pw }).catch((err) => alert(err.message));
+    await api.send("PATCH", `/users/${ureset.dataset.ureset}`, { password: pw }).catch((err) => { rethrowStale(err); alert(err.message); });
     refresh();
     return;
   }
   const udis = e.target.closest("[data-udisable]");
   if (udis) {
     const disabled = udis.dataset.on !== "true";
-    await api.send("PATCH", `/users/${udis.dataset.udisable}`, { disabled }).catch((err) => alert(err.message));
+    await api.send("PATCH", `/users/${udis.dataset.udisable}`, { disabled }).catch((err) => { rethrowStale(err); alert(err.message); });
     refresh();
     return;
   }
   const udel = e.target.closest("[data-udel]");
   if (udel) {
     if (!confirm(t("settings.users.confirmDelete"))) return;
-    await api.send("DELETE", `/users/${udel.dataset.udel}`).catch((err) => alert(err.message));
+    await api.send("DELETE", `/users/${udel.dataset.udel}`).catch((err) => { rethrowStale(err); alert(err.message); });
     refresh();
   }
 });
@@ -1751,57 +2110,75 @@ $("pw-save").addEventListener("click", async () => {
     $("pw-new2").value = "";
     flash($("pw-msg"), t("settings.account.changed"));
   } catch (err) {
+    if (isStaleSession(err)) return;
     flash($("pw-msg"), String(err.message), false);
   }
 });
 
 // ---- Uppdatering -----------------------------------------------------
 
-async function refresh() {
+async function refreshOnce(signal) {
+  const generation = sessionGeneration;
+  if (!me) return;
   try {
     // Översikten hämtas alltid: sidopanelens lägen, statuskortet och
     // tidsstämpeln gäller oavsett vilken vy som visas.
-    renderOverview(await api.get("/overview"));
+    renderOverview(await api.get("/overview", { signal }));
 
     if (view === "terminal") {
       const [ev, dl] = await Promise.all([
-        api.get("/events?limit=150"),
-        api.get("/deliveries?limit=60"),
+        api.get("/events?limit=150", { signal }),
+        api.get("/deliveries?limit=60", { signal }),
       ]);
       renderLog(ev, dl);
     }
 
+    if (view === "account") {
+      await renderPush(signal);
+    }
+
     if (view === "settings" && tab === "devices") {
-      const [hosts, groups] = await Promise.all([api.get("/hosts"), api.get("/groups")]);
+      const [hosts, groups] = await Promise.all([
+        api.get("/hosts", { signal }),
+        api.get("/groups", { signal }),
+      ]);
       groupsCache = groups;
       renderDevices(hosts);
     }
 
     if (view === "settings" && tab === "groups") {
-      renderGroups(await api.get("/groups"));
+      renderGroups(await api.get("/groups", { signal }));
     }
 
     if (view === "settings" && tab === "maintenance") {
       const [mw, hosts, groups] = await Promise.all([
-        api.get("/maintenance"),
-        api.get("/hosts"),
-        api.get("/groups"),
+        api.get("/maintenance", { signal }),
+        api.get("/hosts", { signal }),
+        api.get("/groups", { signal }),
       ]);
       renderMaintenance(mw.windows, hosts, groups);
     }
 
     if (view === "settings" && tab === "channels") {
-      const [s, sec] = await Promise.all([api.get("/settings"), api.get("/secrets")]);
+      const [s, sec] = await Promise.all([
+        api.get("/settings", { signal }),
+        api.get("/secrets", { signal }),
+      ]);
       renderSettings(s, sec.names, null);
-      await renderChannels(s, sec.names);
-      loadSmsExtras();
+      await renderChannels(s, sec.names, signal);
+      await renderPush(signal);
+      await loadSmsExtras(signal);
     }
 
     if (view === "settings" && tab === "system") {
       const [s, sec, health] = await Promise.all([
-        api.get("/settings"),
-        api.get("/secrets"),
-        api.get("/health").catch(() => null),
+        api.get("/settings", { signal }),
+        api.get("/secrets", { signal }),
+        api.get("/health", { signal }).catch((err) => {
+          rethrowStale(err);
+          if (signal.aborted) throw err;
+          return null;
+        }),
       ]);
       settingsCache = s;
       renderSettings(s, sec.names, health);
@@ -1809,19 +2186,43 @@ async function refresh() {
 
     if (view === "settings" && tab === "users" && me?.role === "admin") {
       const [users, auditRows] = await Promise.all([
-        api.get("/users"),
-        api.get("/audit?limit=200"),
+        api.get("/users", { signal }),
+        api.get("/audit?limit=200", { signal }),
       ]);
       renderUsers(users, auditRows);
     }
+    if (generation !== sessionGeneration || !me) return;
+    setConnectionState(true);
   } catch (err) {
-    if (!me) return; // utloggad — inloggningen visas redan
+    if (isStaleSession(err)) return;
+    if (generation !== sessionGeneration || !me) return;
+    setConnectionState(false);
     $("verdict").className = "verdict alarm";
     $("verdict-state").textContent = t("dash.noContactTitle");
-    $("verdict-detail").textContent = String(err.message);
+    $("verdict-detail").textContent = signal.aborted
+      ? t("connection.timeout")
+      : String(err.message);
     $("engine-led").className = "led offline";
     $("engine-state").textContent = t("rail.engineNoContact");
   }
+}
+
+refreshCoordinator = RefreshCoordinator.createRefreshCoordinator(refreshOnce, { timeoutMs: REFRESH_TIMEOUT_MS });
+
+function refresh() {
+  if (!me) return Promise.resolve();
+  // refreshOnce har redan satt fail-closed-banner och status. UI-triggers
+  // observerar normalt inte Promise-resultatet, så konsumera coordinatorns
+  // timeout/abort här för att undvika unhandledrejection i webbläsaren.
+  return refreshCoordinator.run().catch(() => {});
+}
+
+// Installationsbar PWA. Registreringsfel påverkar aldrig övervakningsvyn —
+// appen fungerar då fortsatt som vanlig säker webbklient.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/service-worker.js", { scope: "/" }).catch(() => {});
+  });
 }
 
 boot();

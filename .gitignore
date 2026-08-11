@@ -7,3 +7,5 @@ secrets.enc
 config.toml
 secrets.key
 dev-config.toml
+__pycache__/
+*.py[cod]

@@ -16,7 +16,7 @@
 // =====================================================================
 
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::time::Duration;
 
 use crate::channels;
@@ -94,12 +94,19 @@ impl Queue {
                 })
                 .await?;
 
-            let result =
-                channels::send(&d.channel, &d.payload, &config, &self.secrets, lang).await;
+            let result = channels::send(
+                &d.channel,
+                &d.payload,
+                &config,
+                &self.secrets,
+                &self.db,
+                lang,
+            )
+            .await;
 
             let now = now_ms();
             match result {
-                Ok(()) => {
+                channels::SendOutcome::Delivered => {
                     tracing::info!("levererat → {} ({})", d.channel, d.device);
                     let text = crate::i18n::ev_delivered(lang, &d.channel, &d.device);
                     self.db
@@ -110,7 +117,26 @@ impl Queue {
                         })
                         .await?;
                 }
-                Err(e) => {
+                channels::SendOutcome::Terminal(e) => {
+                    let msg = format!("{e:#}");
+                    let attempts = d.attempts + 1;
+                    tracing::error!(
+                        "terminalt delresultat → {} ({}) efter {} försök: {msg}",
+                        d.channel,
+                        d.device,
+                        attempts
+                    );
+                    let text =
+                        crate::i18n::ev_gave_up(lang, &d.channel, &d.device, attempts as u32, &msg);
+                    self.db
+                        .call(move |conn| {
+                            mark_failed(conn, d.id, attempts, &msg)?;
+                            log_event(conn, now, "warn", &text)?;
+                            Ok(())
+                        })
+                        .await?;
+                }
+                channels::SendOutcome::Retryable(e) => {
                     let msg = format!("{e:#}");
                     let age = now - d.created_at;
                     let attempts = d.attempts + 1;
@@ -146,9 +172,7 @@ impl Queue {
                             delay / 1000
                         );
                         self.db
-                            .call(move |conn| {
-                                reschedule(conn, d.id, attempts, now + delay, &msg)
-                            })
+                            .call(move |conn| reschedule(conn, d.id, attempts, now + delay, &msg))
                             .await?;
                     }
                 }

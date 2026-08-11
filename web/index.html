@@ -2,8 +2,13 @@
 <html lang="sv">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0c1217">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="NetFyr">
 <title>NetFyr</title>
+<link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
@@ -30,12 +35,17 @@
   </form>
 </div>
 
+<div class="connection-banner" id="connection-banner" role="status" aria-live="assertive" hidden>
+  <span class="led offline"></span>
+  <span data-i18n="connection.lost">Ingen kontakt med NetFyr — visad status kan vara inaktuell.</span>
+</div>
+
 <aside class="rail">
   <div class="brand">
     <div class="brandmark">NF</div>
     <div>
       <div class="brand-name">Net<b>Fyr</b></div>
-      <span class="brand-sub"><span data-i18n="brandSub">vakt</span><span class="brand-version" id="version">v1.0.0</span></span>
+      <span class="brand-sub"><span data-i18n="brandSub">vakt</span><span class="brand-version" id="version">v1.2.0</span></span>
     </div>
   </div>
 
@@ -709,6 +719,27 @@
       </div>
     </article>
 
+    <article class="card" id="push-card">
+      <div class="section-head">
+        <h2 data-i18n="settings.ch.pushTitle">Pushnotiser</h2>
+        <p data-i18n="settings.ch.pushDesc">Systemnotiser direkt i telefonen via den installerade appen — även när
+           appen är stängd. På iPhone krävs att appen är tillagd på hemskärmen.</p>
+      </div>
+      <div class="switch-row">
+        <div class="switch-text">
+          <div class="switch-label" data-i18n="common.active">Aktiv</div>
+          <p class="switch-desc" id="push-status" data-i18n="common.notConfigured">Ej konfigurerad</p>
+        </div>
+        <button class="toggle" id="push-toggle" aria-label="Pushnotiser"><span class="knob"></span></button>
+      </div>
+      <div class="ch-status">
+        <button class="btn btn-beacon" id="push-device" data-i18n="settings.ch.pushDeviceOn">Aktivera notiser på den här enheten</button>
+        <button class="btn" id="push-test" data-i18n="common.test">Testa</button>
+        <span class="msg" id="push-msg"></span>
+      </div>
+      <p class="field-hint" id="push-subinfo"></p>
+    </article>
+
     <!-- Språkvalet finns även här: rollen user ser inte Inställningar,
          men språk är ett personligt val som alla ska kunna byta. -->
     <article class="card">
@@ -730,7 +761,18 @@
   </section>
 </main>
 
+<!-- Telefonens primära navigation. Samma data-view-kontrakt som desktopens
+     sidopanel gör att båda använder exakt samma vy- och behörighetslogik. -->
+<nav class="mobile-nav" id="mobile-nav" aria-label="Primär navigation" data-i18n-aria="nav.primary">
+  <button class="mobile-nav-item nav-item active" data-view="overview"><span class="glyph">◎</span><span data-i18n="nav.overview">Översikt</span></button>
+  <button class="mobile-nav-item nav-item" data-view="stats"><span class="glyph">▤</span><span data-i18n="nav.stats">Statistik</span></button>
+  <button class="mobile-nav-item nav-item" data-view="terminal"><span class="glyph">❯</span><span data-i18n="nav.terminal">Terminal</span></button>
+  <button class="mobile-nav-item nav-item" data-view="account"><span class="glyph">◉</span><span data-i18n="nav.account">Konto</span></button>
+  <button class="mobile-nav-item nav-item" data-view="settings" id="mobile-nav-settings"><span class="glyph">⚙</span><span data-i18n="nav.settings">Inställningar</span></button>
+</nav>
+
 <script src="/i18n.js"></script>
+<script src="/refresh-coordinator.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

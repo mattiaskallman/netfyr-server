@@ -2,6 +2,10 @@
 # Transactionally replace an installed NetFyr package with a verified staging tree.
 set -Eeuo pipefail
 
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=netfyr-health.func
+source "$script_dir/netfyr-health.func"
+
 stage=${1:?verified staging directory required}
 new_version=${2:?new version required}
 netfyr_ip=${3:-}
@@ -40,8 +44,7 @@ health_check() {
   if [[ -n "$prefix" ]]; then
     ! fail_at health
   else
-    curl -fsS http://127.0.0.1:8080/api/health >/dev/null &&
-      curl -kfsS "https://${netfyr_ip}/api/health" >/dev/null
+    netfyr_wait_for_health 1 "$netfyr_ip"
   fi
 }
 
@@ -50,34 +53,27 @@ rollback_required=0
 service_stopped=0
 
 restore_previous() {
-  local failed=0
   if fail_at rollback; then
     return 1
   fi
-  set +e
-  service_stop >/dev/null 2>&1
-  rm -rf "$package" "$config" "$data" "$web"
-  rm -f "$binary" "$unit" "$marker"
-  cp -a "$backup/package" "$package" || failed=1
-  cp -a "$backup/config" "$config" || failed=1
-  cp -a "$backup/data" "$data" || failed=1
-  cp -a "$backup/web" "$web" || failed=1
-  cp -a "$backup/netfyr-server" "$binary" || failed=1
-  cp -a "$backup/netfyr.service" "$unit" || failed=1
-  [[ ! -f "$backup/version-marker" ]] || cp -a "$backup/version-marker" "$marker" || failed=1
+  service_stop >/dev/null 2>&1 || return 1
+  rm -rf "$package" "$config" "$data" "$web" || return 1
+  rm -f "$binary" "$unit" "$marker" || return 1
+  cp -a "$backup/package" "$package" || return 1
+  cp -a "$backup/config" "$config" || return 1
+  cp -a "$backup/data" "$data" || return 1
+  cp -a "$backup/web" "$web" || return 1
+  cp -a "$backup/netfyr-server" "$binary" || return 1
+  cp -a "$backup/netfyr.service" "$unit" || return 1
+  [[ ! -f "$backup/version-marker" ]] || cp -a "$backup/version-marker" "$marker" || return 1
   if [[ -z "$prefix" ]]; then
-    systemctl daemon-reload || failed=1
+    systemctl daemon-reload || return 1
   fi
-  service_start || failed=1
+  service_start || return 1
   if [[ -z "$prefix" ]]; then
-    for _ in {1..20}; do
-      health_check && break
-      sleep 1
-    done
-    health_check || failed=1
+    health_check || return 1
   fi
-  set -e
-  return "$failed"
+  return 0
 }
 
 on_exit() {

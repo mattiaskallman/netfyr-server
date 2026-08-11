@@ -16,14 +16,32 @@
 // =====================================================================
 
 pub mod mqtt;
-pub mod smtp;
+pub mod push;
 pub mod sms;
+pub mod smtp;
 pub mod webhook;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::db::Db;
 use crate::secrets::Secrets;
+
+#[derive(Debug)]
+pub enum SendOutcome {
+    Delivered,
+    Retryable(anyhow::Error),
+    /// Några mottagare har redan fått leveransen. Felet ska synas men ett
+    /// kanalretry skulle duplicera notisen till de lyckade mottagarna.
+    Terminal(anyhow::Error),
+}
+
+fn retryable(result: Result<()>) -> SendOutcome {
+    match result {
+        Ok(()) => SendOutcome::Delivered,
+        Err(error) => SendOutcome::Retryable(error),
+    }
+}
 
 /// Larmet som skickas till kanalerna.
 ///
@@ -62,29 +80,98 @@ pub async fn send(
     payload: &str,
     config: &str,
     secrets: &Secrets,
+    db: &Db,
     lang: crate::i18n::Lang,
-) -> Result<()> {
-    match channel {
+) -> SendOutcome {
+    let regular: Result<()> = match channel {
         "webhook" => {
-            let url = secrets.require("webhook")?;
+            let url = match secrets.require("webhook") {
+                Ok(url) => url,
+                Err(error) => return SendOutcome::Retryable(error),
+            };
             webhook::send(&url, payload, lang).await
         }
         "smtp" => {
-            let password = secrets.require("smtp")?;
+            let password = match secrets.require("smtp") {
+                Ok(password) => password,
+                Err(error) => return SendOutcome::Retryable(error),
+            };
             let (payload, config) = (payload.to_string(), config.to_string());
-            tokio::task::spawn_blocking(move || smtp::send(&payload, &config, &password, lang)).await?
+            match tokio::task::spawn_blocking(move || {
+                smtp::send(&payload, &config, &password, lang)
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => Err(error.into()),
+            }
         }
         "mqtt" => {
-            // Lösenord är valfritt: brokers kan tillåta anonym publicering.
             let password = secrets.get("mqtt").unwrap_or_default();
             let (payload, config) = (payload.to_string(), config.to_string());
-            tokio::task::spawn_blocking(move || mqtt::send(&payload, &config, &password, lang)).await?
+            match tokio::task::spawn_blocking(move || {
+                mqtt::send(&payload, &config, &password, lang)
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => Err(error.into()),
+            }
         }
         "sms" => {
-            let password = secrets.require("sms")?;
+            let password = match secrets.require("sms") {
+                Ok(password) => password,
+                Err(error) => return SendOutcome::Retryable(error),
+            };
             sms::send(payload, config, &password, lang).await
         }
-        "radio" => bail!(crate::i18n::radio_not_in_server(lang)),
-        other => bail!(crate::i18n::unknown_channel_named(lang, other)),
-    }
+        "push" => {
+            let report = match push::send(payload, config, secrets, lang).await {
+                Ok(report) => report,
+                Err(push::PushSendError::Permanent(error)) => {
+                    return SendOutcome::Terminal(error);
+                }
+            };
+            let expired = report.expired_endpoints.len();
+            if expired > 0 {
+                if let Err(error) = push::prune_expired(db, &report.expired_endpoints).await {
+                    let error =
+                        anyhow::anyhow!("push: kunde inte pruna utgångna prenumerationer: {error}");
+                    return match push::classify_prune_failure(report.sent, report.permanent_failed)
+                    {
+                        push::DeliveryClass::Retryable => SendOutcome::Retryable(error),
+                        push::DeliveryClass::Delivered | push::DeliveryClass::TerminalPartial => {
+                            SendOutcome::Terminal(error)
+                        }
+                    };
+                }
+            }
+            let class = push::classify_delivery(
+                report.sent,
+                report.transient_failed,
+                report.permanent_failed,
+                expired,
+            );
+            let error = || {
+                report.last_error.unwrap_or_else(|| {
+                    anyhow::anyhow!(
+                        "push: ofullständig leverans (skickade={}, tillfälliga fel={}, permanenta fel={}, utgångna={expired})",
+                        report.sent,
+                        report.transient_failed,
+                        report.permanent_failed
+                    )
+                })
+            };
+            return match class {
+                push::DeliveryClass::Delivered => SendOutcome::Delivered,
+                push::DeliveryClass::Retryable => SendOutcome::Retryable(error()),
+                push::DeliveryClass::TerminalPartial => SendOutcome::Terminal(error()),
+            };
+        }
+        "radio" => Err(anyhow::anyhow!(crate::i18n::radio_not_in_server(lang))),
+        other => Err(anyhow::anyhow!(crate::i18n::unknown_channel_named(
+            lang, other
+        ))),
+    };
+    retryable(regular)
 }

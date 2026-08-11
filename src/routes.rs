@@ -72,6 +72,13 @@ pub fn build(state: AppState, static_dir: Option<std::path::PathBuf>) -> Router 
         // Statistik/KPI är läsläge över mätdata — samma information som
         // översikten, bara aggregerad över tid.
         .route("/stats", get(api::stats::get))
+        // Push: status är läsläge, och prenumerationen är ett per-enhetsval
+        // som varje inloggad användare gör för sin egen klient.
+        .route("/push/status", get(api::push::status))
+        .route(
+            "/push/subscriptions",
+            post(api::push::subscribe).delete(api::push::unsubscribe),
+        )
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_auth,
@@ -96,6 +103,9 @@ pub fn build(state: AppState, static_dir: Option<std::path::PathBuf>) -> Router 
             get(api::settings::get_channel).put(api::settings::set_channel),
         )
         .route("/channels/{name}/test", post(api::channels::test))
+        // Kanalens på/av påverkar larmflödet för alla — admin.
+        .route("/push/enable", post(api::push::enable))
+        .route("/push/disable", post(api::push::disable))
         .route("/channels/sms/verify", post(api::channels::sms_verify))
         .route("/sms/sessions", get(api::channels::sms_sessions))
         .route("/maintenance", post(api::maintenance::create))

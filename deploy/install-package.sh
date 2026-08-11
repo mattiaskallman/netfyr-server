@@ -24,7 +24,10 @@ valid_ipv4() {
 [[ -f "$package_root/bin/netfyr-server" ]] || { echo "Missing release binary" >&2; exit 1; }
 [[ -f "$package_root/web/index.html" ]] || { echo "Missing web interface" >&2; exit 1; }
 [[ -f "$package_root/deploy/netfyr.service" ]] || { echo "Missing systemd unit" >&2; exit 1; }
+[[ -f "$package_root/deploy/netfyr-health.func" ]] || { echo "Missing health helper" >&2; exit 1; }
 [[ -f "$package_root/LICENSE" ]] || { echo "Missing licence" >&2; exit 1; }
+# shellcheck source=netfyr-health.func
+source "$package_root/deploy/netfyr-health.func"
 
 if [[ -z "$prefix" && ${EUID:-$(id -u)} -ne 0 ]]; then
   echo "Run as root" >&2
@@ -118,18 +121,16 @@ if [[ "$configure_caddy" == 1 ]] && ! systemctl restart caddy; then
 fi
 [[ "$configure_caddy" == 1 ]] && rm -f "$caddy_backup"
 
+if ! netfyr_wait_for_health "$configure_caddy" "$netfyr_ip"; then
+  echo "NetFyr health check failed after service restart" >&2
+  exit 1
+fi
+
 if [[ "$configure_caddy" == 1 ]]; then
-  for _ in {1..20}; do
-    curl -kfsS "https://${netfyr_ip}/api/health" >/dev/null && break
-    sleep 1
-  done
-  curl -kfsS "https://${netfyr_ip}/api/health" >/dev/null
   ca=/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt
   [[ -f "$ca" ]] && install -m 0644 "$ca" /root/netfyr-ca-root.crt
   echo "NetFyr: https://${netfyr_ip}"
   [[ -f /root/netfyr-ca-root.crt ]] && echo "Local CA: /root/netfyr-ca-root.crt"
-else
-  curl -fsS http://127.0.0.1:8080/api/health >/dev/null
 fi
 
 echo "First admin password: journalctl -u netfyr -n 50 | sed -n '/FIRST RUN/,+4p'"

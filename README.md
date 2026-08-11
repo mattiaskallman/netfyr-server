@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.2-2f855a" alt="Version 1.0.2">
+  <img src="https://img.shields.io/badge/version-1.2.0-2f855a" alt="Version 1.2.0">
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0">
   <img src="https://img.shields.io/badge/platform-Debian%2013-lightgrey" alt="Platform: Debian 13">
   <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20Axum-orange" alt="Built with Rust and Axum">
@@ -35,6 +35,7 @@ to air-gapped installations.
 - **Audit trail** — security-relevant and mutating actions are traceable
 - **Swedish and English** — personal UI language and shared engine language
 - **Watchdog** — optional TCP heartbeat for an external supervision device
+- **Installable mobile app** — responsive PWA for Android and iPhone
 
 ## Quick installation on Proxmox VE
 
@@ -52,10 +53,10 @@ When the installer has been accepted upstream, the canonical command will use
   script=$(mktemp)
   trap 'rm -f "$script"' EXIT
   curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-    https://raw.githubusercontent.com/mattiaskallman/netfyr-server/v1.0.2/community-scripts/ct/netfyr.sh \
+    https://raw.githubusercontent.com/mattiaskallman/netfyr-server/v1.2.0/community-scripts/ct/netfyr.sh \
     -o "$script"
   printf '%s  %s\n' \
-    27564cda3070f1639b5d7c1ef6243cf4c73c0f436b94035ceff2fd6579fbef23 \
+    4391c9f28c68dd0104bdb82b4afe7b1a98f1a90f5f8d8751d51d464a6cd5204b \
     "$script" | sha256sum -c -
   bash "$script"
 )
@@ -66,6 +67,22 @@ it by piping a changing branch directly into a shell.
 
 The generated local CA certificate must be trusted once on each client. The
 installer prints both its location and the NetFyr URL.
+
+## Install on Android or iPhone
+
+NetFyr v1.2.0 is an installable Progressive Web App. Open the normal HTTPS
+address in Chrome on Android and choose **Install app**, or open it in Safari on
+iPhone and choose **Share → Add to Home Screen**. The installed app uses the
+same session authentication and server-enforced roles as the desktop interface.
+
+The phone must trust the installation's local Caddy CA certificate. Use NetFyr
+over the local network or a private VPN such as WireGuard or Tailscale; do not
+expose the administration interface directly to the public internet.
+
+The service worker caches only the static app shell. Operational `/api` data is
+never intercepted or stored in Cache Storage. If NetFyr cannot be reached, the
+app keeps the last screen for orientation but shows a prominent stale-status
+warning until a new live refresh succeeds.
 
 ## Build from source
 

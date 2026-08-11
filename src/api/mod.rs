@@ -18,6 +18,7 @@ pub mod hosts;
 pub mod logs;
 pub mod maintenance;
 pub mod overview;
+pub mod push;
 pub mod secrets;
 pub mod settings;
 pub mod stats;

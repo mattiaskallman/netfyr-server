@@ -25,12 +25,17 @@ jobs:
         run: |
           node --check web/app.js
           node --check web/i18n.js
+          node --check web/refresh-coordinator.js
+          node --check web/service-worker.js
+      - name: PWA tests
+        run: ./scripts/test-pwa.sh
       - name: Release security tests
         run: |
           ./scripts/test-release-download.sh
           ./scripts/test-update-transaction.sh
           ./scripts/test-community-installer-regressions.sh
           ./scripts/test-first-run-language.sh
+          ./scripts/test-release-chain.sh
       - name: Verify release archive
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')

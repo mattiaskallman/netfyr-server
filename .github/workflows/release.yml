@@ -30,6 +30,10 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
           test "${GITHUB_REF_NAME}" = "v${version}"
+      - name: PWA and release-chain tests
+        run: |
+          ./scripts/test-pwa.sh
+          ./scripts/test-release-chain.sh
       - name: Build twice and verify reproducibility
         run: ./scripts/check-reproducible-release.sh
       - name: Verify package

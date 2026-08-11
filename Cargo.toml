@@ -1,11 +1,9 @@
 [package]
 name = "netfyr-server"
-version = "1.0.2"
+version = "1.2.0"
 edition = "2021"
 description = "NetFyr Server — nätverksövervakning som tjänst"
 authors = ["Mattias Källman"]
-license = "AGPL-3.0-only"
-repository = "https://github.com/mattiaskallman/netfyr-server"
 publish = false
 
 [dependencies]
@@ -32,6 +30,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Kanaler.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "charset"] }
+
+# Web Push (RFC 8030): VAPID-signering (RFC 8292) + aes128gcm-kryptering
+# (RFC 8291/8188). Implementerat direkt på ren Rust-krypto — web-push/ece-
+# craten drar in openssl, och hela projektet är medvetet rustls/pure-rust.
+jwt-simple = { version = "0.11", default-features = false }
+base64 = "0.22"
+p256 = { version = "0.13", features = ["ecdh"] }
+aes-gcm = "0.10"
+hmac = "0.12"
+rand_core = { version = "0.6", features = ["getrandom"] }
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls", "hostname"] }
 rumqttc = { version = "0.24", default-features = false }
 

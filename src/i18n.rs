@@ -207,6 +207,31 @@ t!(test_device, "Test från NetFyr Server", "Test from NetFyr Server");
 t!(test_message, "Testlarm — kanalen når sin mottagare.",
    "Test alarm — the channel reaches its recipient.");
 t!(invalid_alarm, "ogiltigt larm", "invalid alarm");
+t!(push_no_subscriptions, "push: inga prenumerationer registrerade",
+   "push: no subscriptions registered");
+t!(push_bad_config, "push: ogiltig kanalconfig", "push: invalid channel configuration");
+t!(push_vapid_missing, "push: VAPID-nyckel saknas — aktivera push först",
+   "push: VAPID key missing — enable push first");
+t!(push_all_failed, "push: alla sändningar misslyckades", "push: all deliveries failed");
+t!(push_config_corrupt, "push: lagrad kanalconfig är korrupt",
+   "push: stored channel configuration is corrupt");
+t!(push_not_enabled, "push: kanalen är inte aktiverad — be en administratör slå på den först",
+   "push: the channel is not enabled — ask an administrator to enable it first");
+t!(push_bad_endpoint, "push: endpoint måste vara en giltig publik https-adress på port 443 (max 2048 tecken)",
+   "push: endpoint must be a valid public https address on port 443 (max 2048 chars)");
+t!(push_bad_p256dh, "push: ogiltig p256dh-nyckel", "push: invalid p256dh key");
+t!(push_bad_auth, "push: ogiltig auth-hemlighet", "push: invalid auth secret");
+t!(push_bad_label, "push: ogiltig enhetsetikett", "push: invalid device label");
+t!(push_too_many, "push: maximalt 8 prenumerationer per användare och 64 totalt är tillåtna",
+   "push: at most 8 subscriptions per user and 64 total are allowed");
+t!(push_owned_by_other, "push: prenumerationen tillhör en annan användare",
+   "push: the subscription belongs to another user");
+pub fn push_subscription_expired(l: Lang, status: u16) -> String {
+    match l {
+        Lang::Sv => format!("push: prenumerationen har upphört ({status}) — ta bort enheten i inställningarna"),
+        Lang::En => format!("push: subscription has expired ({status}) — remove the device in settings"),
+    }
+}
 t!(webhook_no_url, "ingen webhook-adress angiven", "no webhook URL given");
 t!(webhook_unreachable, "webhook-anropet gick inte fram", "the webhook call did not get through");
 t!(smtp_invalid_config, "ogiltig SMTP-konfiguration", "invalid SMTP configuration");
