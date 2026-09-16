@@ -10,7 +10,7 @@ publish = false
 # HTTP
 axum = "0.8"
 tower-http = { version = "0.6", features = ["fs", "trace"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "io-util", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "io-util", "net", "sync"] }
 
 # Serialisering
 serde = { version = "1", features = ["derive"] }

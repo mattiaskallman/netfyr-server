@@ -21,9 +21,11 @@ use axum::extract::{ConnectInfo, Query, State};
 use axum::{Extension, Json};
 use rusqlite::Connection;
 use serde::Serialize;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use super::{ApiError, ApiResult};
 use crate::auth::AuthUser;
@@ -32,9 +34,61 @@ use crate::routes::AppState;
 
 /// Antal bucklar i svarstidslinjen — samma som desktopvariantens STATS_COLS.
 const COLS: usize = 48;
+const CACHE_TTL: Duration = Duration::from_secs(30);
 
-const KPI_SQL: &str =
-    "SELECT address,
+struct CachedStats {
+    created: Instant,
+    value: StatsView,
+}
+
+#[derive(Default)]
+struct StatsCache {
+    generation: u64,
+    entries: HashMap<String, CachedStats>,
+}
+
+static CACHE: OnceLock<Mutex<StatsCache>> = OnceLock::new();
+
+fn cache() -> &'static Mutex<StatsCache> {
+    CACHE.get_or_init(|| Mutex::new(StatsCache::default()))
+}
+
+fn cached(window: &str) -> Option<StatsView> {
+    let mut guard = cache().lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .entries
+        .retain(|_, item| item.created.elapsed() < CACHE_TTL);
+    guard.entries.get(window).map(|item| item.value.clone())
+}
+
+fn cache_generation() -> u64 {
+    cache().lock().unwrap_or_else(|e| e.into_inner()).generation
+}
+
+/// Kontroll och insert sker under samma lås. Därmed kan clear() aldrig
+/// hamna mellan generationskontrollen och återfyllningen.
+fn cache_put_if_generation(generation: u64, window: String, value: StatsView) -> bool {
+    let mut guard = cache().lock().unwrap_or_else(|e| e.into_inner());
+    if guard.generation != generation {
+        return false;
+    }
+    guard.entries.insert(
+        window,
+        CachedStats {
+            created: Instant::now(),
+            value,
+        },
+    );
+    true
+}
+
+fn cache_clear() {
+    let mut guard = cache().lock().unwrap_or_else(|e| e.into_inner());
+    guard.generation = guard.generation.wrapping_add(1);
+    guard.entries.clear();
+}
+
+const KPI_SQL: &str = "SELECT address,
             COUNT(*) AS total,
             SUM(online) AS online_count,
             AVG(CASE WHEN online = 1 AND latency_us > 0
@@ -42,8 +96,7 @@ const KPI_SQL: &str =
      FROM samples INDEXED BY idx_samples_ts
      WHERE ts >= ?1 GROUP BY address";
 
-const P95_SQL: &str =
-    "WITH ranked AS (
+const P95_SQL: &str = "WITH ranked AS (
        SELECT address, latency_us / 1000.0 AS ms,
               ROW_NUMBER() OVER (PARTITION BY address ORDER BY latency_us) AS rn,
               COUNT(*)     OVER (PARTITION BY address) AS cnt
@@ -56,8 +109,7 @@ const P95_SQL: &str =
                     + (CASE WHEN 0.95 * cnt > CAST(0.95 * cnt AS INT)
                             THEN 1 ELSE 0 END))";
 
-const LINE_SQL: &str =
-    "SELECT address,
+const LINE_SQL: &str = "SELECT address,
             MAX(0, MIN(?1 - 1, CAST(((ts - ?2) * 1.0 / ?3) * ?1 AS INT))) AS bucket,
             AVG(CASE WHEN online = 1 AND latency_us > 0
                      THEN latency_us / 1000.0 END) AS avg_ms,
@@ -67,8 +119,7 @@ const LINE_SQL: &str =
      WHERE ts >= ?2
      GROUP BY address, bucket";
 
-const INCIDENTS_SQL: &str =
-    "WITH flagged AS (
+const INCIDENTS_SQL: &str = "WITH flagged AS (
        SELECT address, ts, online,
               LAG(online) OVER (PARTITION BY address ORDER BY ts) AS prev
        FROM samples INDEXED BY idx_samples_ts WHERE ts >= ?1
@@ -89,7 +140,7 @@ fn window_ms(name: &str) -> Option<i64> {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatsRow {
     pub host_id: i64,
@@ -106,7 +157,7 @@ pub struct StatsRow {
     pub line: Vec<Option<f64>>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Incident {
     pub name: String,
@@ -116,7 +167,7 @@ pub struct Incident {
     pub end: Option<i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatsView {
     pub window: String,
@@ -141,15 +192,33 @@ pub async fn get(
         Some(s) => s,
         None => {
             let lang = crate::i18n::load_db(&state.db).await;
-            return Err(ApiError::bad_request(crate::i18n::unknown_window(lang, &window)));
+            return Err(ApiError::bad_request(crate::i18n::unknown_window(
+                lang, &window,
+            )));
         }
     };
     let now = super::now_ms();
     let from = now - span;
 
+    if let Some(out) = cached(&window) {
+        return Ok(Json(out));
+    }
+
     let out = state
         .db
-        .read_call(move |conn| build(conn, &window, from, now))
+        .read_call(move |conn| {
+            // read_call serialiserar cache-missar. Kontrollera igen efter
+            // grinden så samtidiga anrop delar samma byggjobb.
+            let generation = cache_generation();
+            if let Some(out) = cached(&window) {
+                return Ok(out);
+            }
+            let out = build(conn, &window, from, now)?;
+            // En historikradering kan ha skett medan snapshoten byggdes.
+            // Lägg aldrig tillbaka data från en äldre generation.
+            cache_put_if_generation(generation, window, out.clone());
+            Ok(out)
+        })
         .await?;
     Ok(Json(out))
 }
@@ -182,8 +251,9 @@ fn build(conn: &Connection, window: &str, from: i64, to: i64) -> anyhow::Result<
     let mut p95: HashMap<String, f64> = HashMap::new();
     {
         let mut stmt = conn.prepare(P95_SQL)?;
-        let rows = stmt
-            .query_map([from], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))?;
+        let rows = stmt.query_map([from], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+        })?;
         for row in rows {
             let (addr, ms) = row?;
             p95.insert(addr, ms);
@@ -256,7 +326,7 @@ fn build(conn: &Connection, window: &str, from: i64, to: i64) -> anyhow::Result<
         }
         // Nyast först. Taket finns för att ett flakande nät inte ska
         // kunna skicka tusentals rader till gränssnittet.
-        incidents.sort_by(|a, b| b.start.cmp(&a.start));
+        incidents.sort_by_key(|item| Reverse(item.start));
         incidents.truncate(200);
     }
 
@@ -287,7 +357,7 @@ fn build(conn: &Connection, window: &str, from: i64, to: i64) -> anyhow::Result<
             }
         })
         .collect();
-    rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    rows.sort_by_key(|item| item.name.to_lowercase());
 
     Ok(StatsView {
         window: window.to_string(),
@@ -324,13 +394,17 @@ pub async fn clear(
             Ok(n)
         })
         .await?;
+    cache_clear();
 
     super::audit::record(
         &state.db,
         &actor.username,
         "stats_clear",
         None,
-        Some(&crate::i18n::cleared_detail(crate::i18n::load_db(&state.db).await, removed)),
+        Some(&crate::i18n::cleared_detail(
+            crate::i18n::load_db(&state.db).await,
+            removed,
+        )),
         Some(&addr.ip().to_string()),
     )
     .await;
@@ -347,8 +421,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE samples (id INTEGER PRIMARY KEY, address TEXT NOT NULL, ts INTEGER NOT NULL, online INTEGER NOT NULL, latency_us INTEGER);
-             CREATE INDEX idx_samples_ts ON samples(ts);
-             CREATE INDEX idx_samples_addr_ts ON samples(address, ts);",
+             CREATE INDEX idx_samples_ts ON samples(ts);",
         )
         .unwrap();
 
@@ -374,5 +447,46 @@ mod tests {
                 "frågan använde inte tidsindex: {details:?}"
             );
         }
+    }
+
+    fn empty_stats() -> StatsView {
+        StatsView {
+            window: "24h".to_string(),
+            from: 1,
+            to: 2,
+            total_samples: 0,
+            rows: Vec::new(),
+            incidents: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn cache_clear_tar_bort_tidigare_statistik() {
+        cache_clear();
+        let generation = cache_generation();
+        assert!(cache_put_if_generation(
+            generation,
+            "24h".to_string(),
+            empty_stats()
+        ));
+        assert!(cached("24h").is_some());
+        cache_clear();
+        assert!(cached("24h").is_none());
+    }
+
+    #[test]
+    fn gammal_snapshot_kan_inte_aterfylla_cache_efter_clear() {
+        cache_clear();
+        let stale_generation = cache_generation();
+
+        // Deterministiskt interleaving: snapshoten startar, clear sker,
+        // därefter försöker snapshoten återfylla cachen.
+        cache_clear();
+        assert!(!cache_put_if_generation(
+            stale_generation,
+            "24h".to_string(),
+            empty_stats()
+        ));
+        assert!(cached("24h").is_none());
     }
 }
