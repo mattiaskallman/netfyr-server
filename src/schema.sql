@@ -110,8 +110,8 @@ CREATE TABLE IF NOT EXISTS host_status (
 
 -- ---- Mätvärden -------------------------------------------------------
 --
--- Växer snabbt: en enhet var 10:e sekund ger ~8600 rader per dygn.
--- Gallring är inte valfri, den är en driftförutsättning.
+-- Historiken sparar högst en oförändrad mätning per enhet och minut,
+-- men varje statusväxling direkt. Själva övervakningen kan gå tätare.
 
 CREATE TABLE IF NOT EXISTS samples (
     id         INTEGER PRIMARY KEY,

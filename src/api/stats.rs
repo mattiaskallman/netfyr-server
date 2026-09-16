@@ -33,6 +33,50 @@ use crate::routes::AppState;
 /// Antal bucklar i svarstidslinjen — samma som desktopvariantens STATS_COLS.
 const COLS: usize = 48;
 
+const KPI_SQL: &str =
+    "SELECT address,
+            COUNT(*) AS total,
+            SUM(online) AS online_count,
+            AVG(CASE WHEN online = 1 AND latency_us > 0
+                     THEN latency_us / 1000.0 END) AS avg_ms
+     FROM samples INDEXED BY idx_samples_ts
+     WHERE ts >= ?1 GROUP BY address";
+
+const P95_SQL: &str =
+    "WITH ranked AS (
+       SELECT address, latency_us / 1000.0 AS ms,
+              ROW_NUMBER() OVER (PARTITION BY address ORDER BY latency_us) AS rn,
+              COUNT(*)     OVER (PARTITION BY address) AS cnt
+       FROM samples INDEXED BY idx_samples_ts
+       WHERE ts >= ?1 AND online = 1 AND latency_us > 0
+     )
+     SELECT address, ms FROM ranked
+     WHERE rn = MIN(cnt,
+                    CAST(0.95 * cnt AS INT)
+                    + (CASE WHEN 0.95 * cnt > CAST(0.95 * cnt AS INT)
+                            THEN 1 ELSE 0 END))";
+
+const LINE_SQL: &str =
+    "SELECT address,
+            MAX(0, MIN(?1 - 1, CAST(((ts - ?2) * 1.0 / ?3) * ?1 AS INT))) AS bucket,
+            AVG(CASE WHEN online = 1 AND latency_us > 0
+                     THEN latency_us / 1000.0 END) AS avg_ms,
+            SUM(CASE WHEN online = 1 AND latency_us > 0 THEN 1 ELSE 0 END) AS online_count,
+            SUM(CASE WHEN online = 0 THEN 1 ELSE 0 END) AS offline_count
+     FROM samples INDEXED BY idx_samples_ts
+     WHERE ts >= ?2
+     GROUP BY address, bucket";
+
+const INCIDENTS_SQL: &str =
+    "WITH flagged AS (
+       SELECT address, ts, online,
+              LAG(online) OVER (PARTITION BY address ORDER BY ts) AS prev
+       FROM samples INDEXED BY idx_samples_ts WHERE ts >= ?1
+     )
+     SELECT address, ts, online FROM flagged
+     WHERE prev IS NULL OR online <> prev
+     ORDER BY address, ts";
+
 fn window_ms(name: &str) -> Option<i64> {
     match name {
         "24h" => Some(86_400_000),
@@ -105,7 +149,7 @@ pub async fn get(
 
     let out = state
         .db
-        .call(move |conn| build(conn, &window, from, now))
+        .read_call(move |conn| build(conn, &window, from, now))
         .await?;
     Ok(Json(out))
 }
@@ -117,14 +161,7 @@ fn build(conn: &Connection, window: &str, from: i64, to: i64) -> anyhow::Result<
     let mut kpi: HashMap<String, (i64, i64, Option<f64>)> = HashMap::new();
     let mut total_samples: i64 = 0;
     {
-        let mut stmt = conn.prepare(
-            "SELECT address,
-                    COUNT(*) AS total,
-                    SUM(online) AS online_count,
-                    AVG(CASE WHEN online = 1 AND latency_us > 0
-                             THEN latency_us / 1000.0 END) AS avg_ms
-             FROM samples WHERE ts >= ?1 GROUP BY address",
-        )?;
+        let mut stmt = conn.prepare(KPI_SQL)?;
         let rows = stmt.query_map([from], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -144,20 +181,7 @@ fn build(conn: &Connection, window: &str, from: i64, to: i64) -> anyhow::Result<
     // desktop: 1-baserat rn = min(cnt, ceil(0.95 * cnt)).
     let mut p95: HashMap<String, f64> = HashMap::new();
     {
-        let mut stmt = conn.prepare(
-            "WITH ranked AS (
-               SELECT address, latency_us / 1000.0 AS ms,
-                      ROW_NUMBER() OVER (PARTITION BY address ORDER BY latency_us) AS rn,
-                      COUNT(*)     OVER (PARTITION BY address) AS cnt
-               FROM samples
-               WHERE ts >= ?1 AND online = 1 AND latency_us > 0
-             )
-             SELECT address, ms FROM ranked
-             WHERE rn = MIN(cnt,
-                            CAST(0.95 * cnt AS INT)
-                            + (CASE WHEN 0.95 * cnt > CAST(0.95 * cnt AS INT)
-                                    THEN 1 ELSE 0 END))",
-        )?;
+        let mut stmt = conn.prepare(P95_SQL)?;
         let rows = stmt
             .query_map([from], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))?;
         for row in rows {
@@ -172,16 +196,7 @@ fn build(conn: &Connection, window: &str, from: i64, to: i64) -> anyhow::Result<
     let span = (to - from).max(1);
     let mut lines: HashMap<String, Vec<Option<f64>>> = HashMap::new();
     {
-        let mut stmt = conn.prepare(
-            "SELECT address,
-                    MAX(0, MIN(?1 - 1, CAST(((ts - ?2) * 1.0 / ?3) * ?1 AS INT))) AS bucket,
-                    AVG(CASE WHEN online = 1 AND latency_us > 0
-                             THEN latency_us / 1000.0 END) AS avg_ms,
-                    SUM(CASE WHEN online = 1 AND latency_us > 0 THEN 1 ELSE 0 END) AS online_count,
-                    SUM(CASE WHEN online = 0 THEN 1 ELSE 0 END) AS offline_count
-             FROM samples WHERE ts >= ?2
-             GROUP BY address, bucket",
-        )?;
+        let mut stmt = conn.prepare(LINE_SQL)?;
         let rows = stmt.query_map(rusqlite::params![COLS as i64, from, span], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -211,16 +226,7 @@ fn build(conn: &Connection, window: &str, from: i64, to: i64) -> anyhow::Result<
     // desktop, och ger identiska intervall som att läsa rådata.
     let mut incidents: Vec<Incident> = Vec::new();
     {
-        let mut stmt = conn.prepare(
-            "WITH flagged AS (
-               SELECT address, ts, online,
-                      LAG(online) OVER (PARTITION BY address ORDER BY ts) AS prev
-               FROM samples WHERE ts >= ?1
-             )
-             SELECT address, ts, online FROM flagged
-             WHERE prev IS NULL OR online <> prev
-             ORDER BY address, ts",
-        )?;
+        let mut stmt = conn.prepare(INCIDENTS_SQL)?;
         let rows = stmt.query_map([from], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -330,4 +336,43 @@ pub async fn clear(
     .await;
 
     Ok(Json(serde_json::json!({ "removed": removed })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tidsfiltrerade_statistikfragor_anvander_tidsindex() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE samples (id INTEGER PRIMARY KEY, address TEXT NOT NULL, ts INTEGER NOT NULL, online INTEGER NOT NULL, latency_us INTEGER);
+             CREATE INDEX idx_samples_ts ON samples(ts);
+             CREATE INDEX idx_samples_addr_ts ON samples(address, ts);",
+        )
+        .unwrap();
+
+        let cases: [(&str, Vec<i64>); 4] = [
+            (KPI_SQL, vec![1]),
+            (P95_SQL, vec![1]),
+            (LINE_SQL, vec![48, 1, 1000]),
+            (INCIDENTS_SQL, vec![1]),
+        ];
+
+        for (sql, values) in cases {
+            let explain = format!("EXPLAIN QUERY PLAN {sql}");
+            let mut stmt = conn.prepare(&explain).unwrap();
+            let details: Vec<String> = stmt
+                .query_map(rusqlite::params_from_iter(values), |row| row.get(3))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert!(
+                details
+                    .iter()
+                    .any(|detail| detail.contains("idx_samples_ts (ts>?)")),
+                "frågan använde inte tidsindex: {details:?}"
+            );
+        }
+    }
 }

@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use super::{ApiResult, now_ms};
 use crate::engine::display::{display_status_of, tally_hosts, DisplayTally};
+use crate::engine::polls::PollCounters;
 use crate::engine::repo;
 use crate::engine::suppression::suppression_reason;
 use crate::engine::types::{Host, RawStatus, Status};
@@ -42,7 +43,8 @@ pub struct HostView {
     pub changed_at: Option<i64>,
     /// När enheten senast mättes. Visar hur färska uppgifterna är.
     pub checked_at: Option<i64>,
-    /// Antal mätningar totalt, och hur många som gav svar.
+    /// Antal pollningar sedan den aktuella serverprocessen startade, och
+    /// hur många som gav svar. Börjar medvetet om från noll vid omstart.
     pub polls: i64,
     pub polls_ok: i64,
     /// Senaste svarstiderna i mikrosekunder, äldst först. Noll betyder
@@ -95,14 +97,15 @@ pub struct Overview {
 
 pub async fn get(State(state): State<Arc<AppState>>) -> ApiResult<Json<Overview>> {
     let now = now_ms();
+    let polls = state.polls.clone();
     let out = state
         .db
-        .call(move |conn| build(conn, now))
+        .call(move |conn| build(conn, now, &polls))
         .await?;
     Ok(Json(out))
 }
 
-fn build(conn: &Connection, now: i64) -> anyhow::Result<Overview> {
+fn build(conn: &Connection, now: i64, polls: &PollCounters) -> anyhow::Result<Overview> {
     let settings = repo::load_settings(conn)?;
     let windows = repo::load_windows(conn)?;
     let hosts = repo::load_hosts(conn)?;
@@ -174,26 +177,6 @@ fn build(conn: &Connection, now: i64) -> anyhow::Result<Overview> {
         })
         .collect();
 
-    // Pollningsräknare. En enda GROUP BY i stället för en fråga per
-    // enhet — antalet enheter kan bli stort.
-    let mut polls: HashMap<String, (i64, i64)> = HashMap::new();
-    {
-        let mut stmt = conn.prepare(
-            "SELECT address, COUNT(*), SUM(online) FROM samples GROUP BY address",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-            ))
-        })?;
-        for row in rows {
-            let (a, n, ok) = row?;
-            polls.insert(a, (n, ok));
-        }
-    }
-
     // Sparkline. Ett bundet antal rader totalt, inte per enhet: en
     // ofiltrerad fråga över hela samples-tabellen växer med drifttiden
     // och skulle till slut göra översikten långsam.
@@ -248,8 +231,8 @@ fn build(conn: &Connection, now: i64) -> anyhow::Result<Overview> {
                 latency_us: e.latency_us,
                 changed_at: e.changed_at,
                 checked_at: e.checked_at,
-                polls: polls.get(&h.address).map(|p| p.0).unwrap_or(0),
-                polls_ok: polls.get(&h.address).map(|p| p.1).unwrap_or(0),
+                polls: polls.get(&h.address).0,
+                polls_ok: polls.get(&h.address).1,
                 spark: spark.get(&h.address).cloned().unwrap_or_default(),
                 snooze_until: h.snooze_until,
                 depends_on_address: h.depends_on_address.clone(),
@@ -263,4 +246,46 @@ fn build(conn: &Connection, now: i64) -> anyhow::Result<Overview> {
         tally: tally.into(),
         hosts: views,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::polls::PollCounters;
+
+    #[test]
+    fn oversikten_visar_bara_processens_pollningar() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            concat!(
+                include_str!("../schema.sql"),
+                "\nALTER TABLE hosts ADD COLUMN probe_type TEXT;",
+                "\nALTER TABLE hosts ADD COLUMN probe_port INTEGER;",
+                "\nALTER TABLE hosts ADD COLUMN sms_enabled INTEGER NOT NULL DEFAULT 1;",
+                "\nALTER TABLE host_status ADD COLUMN raw TEXT;"
+            )
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO hosts (name,address,enabled,created_at,updated_at) VALUES ('Router','10.0.0.1',1,1,1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO samples (address,ts,online,latency_us) VALUES ('10.0.0.1',1,1,1000)",
+            [],
+        )
+        .unwrap();
+
+        let counters = PollCounters::default();
+        let after_restart = build(&conn, 2, &counters).unwrap();
+        assert_eq!(after_restart.hosts[0].polls, 0);
+        assert_eq!(after_restart.hosts[0].polls_ok, 0);
+
+        counters.record("10.0.0.1", true);
+        counters.record("10.0.0.1", false);
+        let current_process = build(&conn, 3, &counters).unwrap();
+        assert_eq!(current_process.hosts[0].polls, 2);
+        assert_eq!(current_process.hosts[0].polls_ok, 1);
+    }
 }

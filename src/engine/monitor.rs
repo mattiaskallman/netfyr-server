@@ -40,7 +40,9 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 
 use super::flap::{register_poll, HostMonitorState};
+use super::history::HistoryCadence;
 use super::ping::Pinger;
+use super::polls::PollCounters;
 use super::repo;
 use super::slow::{SlowTracker, Verdict as SlowVerdict};
 use super::suppression::suppression_reason;
@@ -64,6 +66,7 @@ struct PollResult {
 
 pub struct Monitor {
     db: Db,
+    polls: PollCounters,
     pinger: Arc<Pinger>,
     /// Delad HTTP-klient för http-prober. En klient per svep hade
     /// slösat anslutningspoolen som är hela poängen med reqwest.
@@ -71,6 +74,8 @@ pub struct Monitor {
     /// Flap-tillstånd per adress. Lever i minnet mellan svep; endast den
     /// bekräftade statusen persisteras.
     state: HashMap<String, HostMonitorState>,
+    /// Historikens lagringskadens är skild från pollningsfrekvensen.
+    history: HistoryCadence,
     /// Latenslarmets tillstånd per adress (etapp 8). Samma princip som
     /// flap-tillståndet: minnesresident, börjar om vid omstart.
     slow: HashMap<String, SlowTracker>,
@@ -83,12 +88,14 @@ pub struct Monitor {
 }
 
 impl Monitor {
-    pub fn new(db: Db) -> Result<Self> {
+    pub fn new(db: Db, polls: PollCounters) -> Result<Self> {
         Ok(Self {
             db,
+            polls,
             pinger: Arc::new(Pinger::new()?),
             http: reqwest::Client::new(),
             state: HashMap::new(),
+            history: HistoryCadence::default(),
             slow: HashMap::new(),
             next_due: HashMap::new(),
         })
@@ -370,6 +377,8 @@ impl Monitor {
             };
             let online = res.outcome == Outcome::Success;
             let latency = res.latency_us;
+            self.polls.record(&h.address, online);
+            let store_sample = self.history.should_store(&h.address, now, online);
             let addr = h.address.clone();
             let confirmed = h.confirmed;
             let raw = h.raw;
@@ -382,7 +391,9 @@ impl Monitor {
 
             self.db
                 .call(move |conn| {
-                    repo::record_sample(conn, &addr, now, online, latency)?;
+                    if store_sample {
+                        repo::record_sample(conn, &addr, now, online, latency)?;
+                    }
                     repo::save_status(conn, &addr, confirmed, reported, raw, now, latency)?;
                     Ok(())
                 })

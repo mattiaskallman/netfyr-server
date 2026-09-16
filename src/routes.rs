@@ -33,11 +33,13 @@ use tower_http::trace::TraceLayer;
 use crate::api;
 use crate::auth;
 use crate::db::Db;
+use crate::engine::polls::PollCounters;
 use crate::secrets::Secrets;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
+    pub polls: PollCounters,
     pub secrets: Secrets,
     pub started_at: Instant,
     /// Sätt Secure-flaggan på sessionskakan. Ska vara true så fort
