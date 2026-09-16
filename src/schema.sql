@@ -110,8 +110,8 @@ CREATE TABLE IF NOT EXISTS host_status (
 
 -- ---- Mätvärden -------------------------------------------------------
 --
--- Historiken sparar högst en oförändrad mätning per enhet och minut,
--- men varje statusväxling direkt. Själva övervakningen kan gå tätare.
+-- Varje faktisk poll sparas så att drifttid, medelvärde och p95 behåller
+-- pollbaserad semantik. Långtidsaggregering införs i en separat migration.
 
 CREATE TABLE IF NOT EXISTS samples (
     id         INTEGER PRIMARY KEY,
@@ -123,7 +123,6 @@ CREATE TABLE IF NOT EXISTS samples (
 );
 
 CREATE INDEX IF NOT EXISTS idx_samples_ts      ON samples(ts);
-CREATE INDEX IF NOT EXISTS idx_samples_addr_ts ON samples(address, ts);
 
 -- ---- Händelselogg ----------------------------------------------------
 --

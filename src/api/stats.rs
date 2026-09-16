@@ -21,9 +21,12 @@ use axum::extract::{ConnectInfo, Query, State};
 use axum::{Extension, Json};
 use rusqlite::Connection;
 use serde::Serialize;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use super::{ApiError, ApiResult};
 use crate::auth::AuthUser;
@@ -32,9 +35,42 @@ use crate::routes::AppState;
 
 /// Antal bucklar i svarstidslinjen — samma som desktopvariantens STATS_COLS.
 const COLS: usize = 48;
+const CACHE_TTL: Duration = Duration::from_secs(30);
 
-const KPI_SQL: &str =
-    "SELECT address,
+struct CachedStats {
+    created: Instant,
+    value: StatsView,
+}
+
+static CACHE: OnceLock<Mutex<HashMap<String, CachedStats>>> = OnceLock::new();
+static CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn cache() -> &'static Mutex<HashMap<String, CachedStats>> {
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached(window: &str) -> Option<StatsView> {
+    let mut guard = cache().lock().unwrap_or_else(|e| e.into_inner());
+    guard.retain(|_, item| item.created.elapsed() < CACHE_TTL);
+    guard.get(window).map(|item| item.value.clone())
+}
+
+fn cache_put(window: String, value: StatsView) {
+    cache().lock().unwrap_or_else(|e| e.into_inner()).insert(
+        window,
+        CachedStats {
+            created: Instant::now(),
+            value,
+        },
+    );
+}
+
+fn cache_clear() {
+    CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
+    cache().lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
+const KPI_SQL: &str = "SELECT address,
             COUNT(*) AS total,
             SUM(online) AS online_count,
             AVG(CASE WHEN online = 1 AND latency_us > 0
@@ -42,8 +78,7 @@ const KPI_SQL: &str =
      FROM samples INDEXED BY idx_samples_ts
      WHERE ts >= ?1 GROUP BY address";
 
-const P95_SQL: &str =
-    "WITH ranked AS (
+const P95_SQL: &str = "WITH ranked AS (
        SELECT address, latency_us / 1000.0 AS ms,
               ROW_NUMBER() OVER (PARTITION BY address ORDER BY latency_us) AS rn,
               COUNT(*)     OVER (PARTITION BY address) AS cnt
@@ -56,8 +91,7 @@ const P95_SQL: &str =
                     + (CASE WHEN 0.95 * cnt > CAST(0.95 * cnt AS INT)
                             THEN 1 ELSE 0 END))";
 
-const LINE_SQL: &str =
-    "SELECT address,
+const LINE_SQL: &str = "SELECT address,
             MAX(0, MIN(?1 - 1, CAST(((ts - ?2) * 1.0 / ?3) * ?1 AS INT))) AS bucket,
             AVG(CASE WHEN online = 1 AND latency_us > 0
                      THEN latency_us / 1000.0 END) AS avg_ms,
@@ -67,8 +101,7 @@ const LINE_SQL: &str =
      WHERE ts >= ?2
      GROUP BY address, bucket";
 
-const INCIDENTS_SQL: &str =
-    "WITH flagged AS (
+const INCIDENTS_SQL: &str = "WITH flagged AS (
        SELECT address, ts, online,
               LAG(online) OVER (PARTITION BY address ORDER BY ts) AS prev
        FROM samples INDEXED BY idx_samples_ts WHERE ts >= ?1
@@ -89,7 +122,7 @@ fn window_ms(name: &str) -> Option<i64> {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatsRow {
     pub host_id: i64,
@@ -106,7 +139,7 @@ pub struct StatsRow {
     pub line: Vec<Option<f64>>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Incident {
     pub name: String,
@@ -116,7 +149,7 @@ pub struct Incident {
     pub end: Option<i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatsView {
     pub window: String,
@@ -147,9 +180,27 @@ pub async fn get(
     let now = super::now_ms();
     let from = now - span;
 
+    if let Some(out) = cached(&window) {
+        return Ok(Json(out));
+    }
+
     let out = state
         .db
-        .read_call(move |conn| build(conn, &window, from, now))
+        .read_call(move |conn| {
+            // read_call serialiserar cache-missar. Kontrollera igen efter
+            // grinden så samtidiga anrop delar samma byggjobb.
+            let generation = CACHE_GENERATION.load(Ordering::Acquire);
+            if let Some(out) = cached(&window) {
+                return Ok(out);
+            }
+            let out = build(conn, &window, from, now)?;
+            // En historikradering kan ha skett medan snapshoten byggdes.
+            // Lägg aldrig tillbaka data från en äldre generation.
+            if CACHE_GENERATION.load(Ordering::Acquire) == generation {
+                cache_put(window, out.clone());
+            }
+            Ok(out)
+        })
         .await?;
     Ok(Json(out))
 }
@@ -256,7 +307,7 @@ fn build(conn: &Connection, window: &str, from: i64, to: i64) -> anyhow::Result<
         }
         // Nyast först. Taket finns för att ett flakande nät inte ska
         // kunna skicka tusentals rader till gränssnittet.
-        incidents.sort_by(|a, b| b.start.cmp(&a.start));
+        incidents.sort_by_key(|item| Reverse(item.start));
         incidents.truncate(200);
     }
 
@@ -287,7 +338,7 @@ fn build(conn: &Connection, window: &str, from: i64, to: i64) -> anyhow::Result<
             }
         })
         .collect();
-    rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    rows.sort_by_key(|item| item.name.to_lowercase());
 
     Ok(StatsView {
         window: window.to_string(),
@@ -324,6 +375,7 @@ pub async fn clear(
             Ok(n)
         })
         .await?;
+    cache_clear();
 
     super::audit::record(
         &state.db,
@@ -347,8 +399,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE samples (id INTEGER PRIMARY KEY, address TEXT NOT NULL, ts INTEGER NOT NULL, online INTEGER NOT NULL, latency_us INTEGER);
-             CREATE INDEX idx_samples_ts ON samples(ts);
-             CREATE INDEX idx_samples_addr_ts ON samples(address, ts);",
+             CREATE INDEX idx_samples_ts ON samples(ts);",
         )
         .unwrap();
 
@@ -374,5 +425,22 @@ mod tests {
                 "frågan använde inte tidsindex: {details:?}"
             );
         }
+    }
+
+    #[test]
+    fn cache_clear_tar_bort_tidigare_statistik() {
+        cache_clear();
+        let value = StatsView {
+            window: "24h".to_string(),
+            from: 1,
+            to: 2,
+            total_samples: 0,
+            rows: Vec::new(),
+            incidents: Vec::new(),
+        };
+        cache_put("24h".to_string(), value);
+        assert!(cached("24h").is_some());
+        cache_clear();
+        assert!(cached("24h").is_none());
     }
 }

@@ -346,6 +346,34 @@ pub fn save_transition(
 
 // ---- Mätvärden, logg och kö ------------------------------------------
 
+/// Ett komplett pollresultat som ska skrivas i en transaktion.
+pub struct PollRecord<'a> {
+    pub address: &'a str,
+    pub ts: i64,
+    pub online: bool,
+    pub latency_us: Option<u32>,
+    pub status: Status,
+    pub reported: Status,
+    pub raw: RawStatus,
+}
+
+/// Spara sample och aktuell host-status atomiskt för samma poll.
+pub fn record_poll(conn: &Connection, poll: PollRecord<'_>) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    record_sample(&tx, poll.address, poll.ts, poll.online, poll.latency_us)?;
+    save_status(
+        &tx,
+        poll.address,
+        poll.status,
+        poll.reported,
+        poll.raw,
+        poll.ts,
+        poll.latency_us,
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn record_sample(
     conn: &Connection,
     address: &str,
@@ -472,4 +500,52 @@ pub fn find_or_create_group(conn: &Connection, name: &str) -> Result<Option<i64>
     }
     conn.execute("INSERT INTO groups (name) VALUES (?1)", [name])?;
     Ok(Some(conn.last_insert_rowid()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_poll_rullar_tillbaka_sample_om_statusskrivningen_misslyckas() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE samples (
+                 id INTEGER PRIMARY KEY,
+                 address TEXT NOT NULL,
+                 ts INTEGER NOT NULL,
+                 online INTEGER NOT NULL,
+                 latency_us INTEGER
+             );
+             CREATE TABLE host_status (
+                 address TEXT PRIMARY KEY,
+                 status TEXT NOT NULL CHECK(status = 'omojligt'),
+                 reported_status TEXT NOT NULL,
+                 raw TEXT NOT NULL,
+                 changed_at INTEGER NOT NULL,
+                 checked_at INTEGER NOT NULL,
+                 last_latency_us INTEGER
+             );",
+        )
+        .unwrap();
+
+        let result = record_poll(
+            &conn,
+            PollRecord {
+                address: "10.0.0.1",
+                ts: 1_000,
+                online: true,
+                latency_us: Some(123),
+                status: Status::Up,
+                reported: Status::Up,
+                raw: RawStatus::Online,
+            },
+        );
+
+        assert!(result.is_err());
+        let samples: i64 = conn
+            .query_row("SELECT COUNT(*) FROM samples", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(samples, 0);
+    }
 }

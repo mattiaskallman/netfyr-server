@@ -16,9 +16,10 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tokio::sync::Semaphore;
 
 /// Aktuell schemaversion. Höjs vid varje migrationssteg.
-const SCHEMA_VERSION: i32 = 7;
+const SCHEMA_VERSION: i32 = 8;
 
 const SCHEMA_SQL: &str = include_str!("schema.sql");
 const MIGRATION_V2_SQL: &str = include_str!("migrations/v2_auth.sql");
@@ -27,6 +28,7 @@ const MIGRATION_V4_SQL: &str = include_str!("migrations/v4_host_raw.sql");
 const MIGRATION_V5_SQL: &str = include_str!("migrations/v5_probes.sql");
 const MIGRATION_V6_SQL: &str = include_str!("migrations/v6_host_sms.sql");
 const MIGRATION_V7_SQL: &str = include_str!("migrations/v7_session_activity.sql");
+const MIGRATION_V8_SQL: &str = include_str!("migrations/v8_drop_unused_samples_index.sql");
 
 fn migration_transaction<F>(conn: &mut Connection, target_version: i32, apply: F) -> Result<()>
 where
@@ -46,6 +48,9 @@ where
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
     path: Arc<PathBuf>,
+    /// Serialiserar potentiellt tunga läsbyggen så att flera 180-dagars-
+    /// anrop inte samtidigt mättar CPU, blocking-pool eller WAL.
+    read_gate: Arc<Semaphore>,
 }
 
 impl Db {
@@ -70,6 +75,7 @@ impl Db {
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
             path: Arc::new(path.to_path_buf()),
+            read_gate: Arc::new(Semaphore::new(1)),
         };
         db.migrate()?;
         Ok(db)
@@ -140,6 +146,12 @@ impl Db {
                 tx.execute_batch(MIGRATION_V7_SQL)
                     .context("kunde inte migrera till schemaversion 7")?;
             }
+
+            // Steg 7 → 8: ta bort oanvänt och mycket stort adressindex.
+            if current < 8 {
+                tx.execute_batch(MIGRATION_V8_SQL)
+                    .context("kunde inte migrera till schemaversion 8")?;
+            }
             Ok(())
         })
     }
@@ -165,15 +177,21 @@ impl Db {
     }
 
     /// Kör en potentiellt lång läsning på en separat skrivskyddad
-    /// anslutning. WAL låter den läsa en stabil snapshot samtidigt som
-    /// motorn fortsätter skriva via primäranslutningen.
+    /// anslutning. Anrop serialiseras och hela callbacken körs i en
+    /// explicit read transaction: alla SELECT-frågor ser samma WAL-snapshot
+    /// samtidigt som motorn kan fortsätta skriva via primäranslutningen.
     pub async fn read_call<T, F>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&Connection) -> Result<T> + Send + 'static,
         T: Send + 'static,
     {
+        let permit = Arc::clone(&self.read_gate)
+            .acquire_owned()
+            .await
+            .context("statistikgrinden stängdes")?;
         let path = Arc::clone(&self.path);
         tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             let conn = Connection::open_with_flags(
                 path.as_ref(),
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -181,7 +199,17 @@ impl Db {
             .with_context(|| format!("kunde inte öppna läsanslutning till {}", path.display()))?;
             conn.busy_timeout(std::time::Duration::from_secs(5))?;
             conn.pragma_update(None, "query_only", true)?;
-            f(&conn)
+            conn.execute_batch("BEGIN DEFERRED")?;
+            match f(&conn) {
+                Ok(value) => {
+                    conn.execute_batch("COMMIT")?;
+                    Ok(value)
+                }
+                Err(error) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(error)
+                }
+            }
         })
         .await
         .context("databasens lästråd kraschade")?
@@ -256,9 +284,15 @@ mod migration_tests {
 
         let task = tokio::spawn(async move {
             reader
-                .read_call(move |_| {
+                .read_call(move |conn| {
+                    let before: i64 =
+                        conn.query_row("SELECT COUNT(*) FROM samples", [], |row| row.get(0))?;
                     started_tx.send(()).unwrap();
                     release_rx.recv().unwrap();
+                    let after: i64 =
+                        conn.query_row("SELECT COUNT(*) FROM samples", [], |row| row.get(0))?;
+                    assert_eq!(before, 0);
+                    assert_eq!(after, before, "läsningen bytte snapshot mitt i callbacken");
                     Ok(())
                 })
                 .await
@@ -269,18 +303,114 @@ mod migration_tests {
         tokio::time::timeout(
             std::time::Duration::from_millis(250),
             db.call(|conn| {
-                conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?;
+                conn.execute(
+                    "INSERT INTO samples (address, ts, online, latency_us)
+                     VALUES ('10.0.0.1', 1000, 1, 100)",
+                    [],
+                )?;
                 Ok(())
             }),
         )
         .await
-        .expect("primäranslutningen blockerades av läsningen")
+        .expect("primärskrivningen blockerades av lässnapshoten")
         .unwrap();
 
         release_tx.send(()).unwrap();
         task.await.unwrap();
         drop(db);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tunga_lasningar_serialiseras() {
+        use std::sync::mpsc;
+
+        let path = std::env::temp_dir().join(format!(
+            "netfyr-read-gate-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&path).unwrap();
+        let first_db = db.clone();
+        let second_db = db.clone();
+        let (first_started_tx, first_started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (second_entered_tx, second_entered_rx) = mpsc::channel();
+
+        let first = tokio::spawn(async move {
+            first_db
+                .read_call(move |conn| {
+                    conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?;
+                    first_started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        });
+        first_started_rx.recv().unwrap();
+
+        let second = tokio::spawn(async move {
+            second_db
+                .read_call(move |conn| {
+                    conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?;
+                    second_entered_tx.send(()).unwrap();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(second_entered_rx.try_recv().is_err());
+        release_tx.send(()).unwrap();
+        first.await.unwrap();
+        second.await.unwrap();
+        second_entered_rx.recv().unwrap();
+
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn v8_tar_bort_det_oanvanda_adressindexet() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE samples (
+                 id INTEGER PRIMARY KEY,
+                 address TEXT NOT NULL,
+                 ts INTEGER NOT NULL,
+                 online INTEGER NOT NULL,
+                 latency_us INTEGER
+             );
+             CREATE INDEX idx_samples_ts ON samples(ts);
+             CREATE INDEX idx_samples_addr_ts ON samples(address, ts);",
+        )
+        .unwrap();
+
+        conn.execute_batch(MIGRATION_V8_SQL).unwrap();
+
+        let address_index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_samples_addr_ts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let time_index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_samples_ts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(address_index, 0);
+        assert_eq!(time_index, 1);
     }
 
     #[test]
