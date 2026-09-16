@@ -128,8 +128,10 @@ async fn main() -> Result<()> {
     tracing::info!("vakthunden startad");
 
     // Motorn körs som en egen task. Den lever lika länge som processen
-    // och avslutas när tokio-runtime rivs vid nedstängning.
-    match engine::monitor::Monitor::new(db.clone()) {
+    // och avslutas när tokio-runtime rivs vid nedstängning. Pollräknarna
+    // är processlokala med flit och börjar därför på noll vid omstart.
+    let polls = engine::polls::PollCounters::default();
+    match engine::monitor::Monitor::new(db.clone(), polls.clone()) {
         Ok(monitor) => {
             tokio::spawn(monitor.run());
             tracing::info!("övervakningsmotorn startad");
@@ -144,6 +146,7 @@ async fn main() -> Result<()> {
 
     let state = routes::AppState {
         db,
+        polls,
         secrets,
         started_at: Instant::now(),
         secure_cookies: cfg.secure_cookies,

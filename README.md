@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.2.3-2f855a" alt="Version 1.2.3">
+  <img src="https://img.shields.io/badge/version-1.2.4-2f855a" alt="Version 1.2.4">
   <img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0">
   <img src="https://img.shields.io/badge/platform-Debian%2013-lightgrey" alt="Platform: Debian 13">
   <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20Axum-orange" alt="Built with Rust and Axum">
@@ -53,10 +53,10 @@ When the installer has been accepted upstream, the canonical command will use
   script=$(mktemp)
   trap 'rm -f "$script"' EXIT
   curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-    https://raw.githubusercontent.com/mattiaskallman/netfyr-server/v1.2.3/community-scripts/ct/netfyr.sh \
+    https://raw.githubusercontent.com/mattiaskallman/netfyr-server/v1.2.4/community-scripts/ct/netfyr.sh \
     -o "$script"
   printf '%s  %s\n' \
-    872f709e6a7d9be976891199a03a4478a843bb60b9ff1b3022117f51ee27e5a5 \
+    4b11ea3646488a3fbf72bdb62355de549e6966d4a5d93762134501087a120e1e \
     "$script" | sha256sum -c -
   bash "$script"
 )
@@ -70,7 +70,7 @@ installer prints both its location and the NetFyr URL.
 
 ## Install on Android or iPhone
 
-NetFyr v1.2.3 is an installable Progressive Web App. Open the normal HTTPS
+NetFyr v1.2.4 is an installable Progressive Web App. Open the normal HTTPS
 address in Chrome on Android and choose **Install app**, or open it in Safari on
 iPhone and choose **Share → Add to Home Screen**. The installed app uses the
 same session authentication and server-enforced roles as the desktop interface.

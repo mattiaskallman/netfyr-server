@@ -13,8 +13,8 @@
 // =====================================================================
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
-use std::path::Path;
+use rusqlite::{Connection, OpenFlags};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// Aktuell schemaversion. Höjs vid varje migrationssteg.
@@ -45,6 +45,7 @@ where
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
+    path: Arc<PathBuf>,
 }
 
 impl Db {
@@ -68,6 +69,7 @@ impl Db {
 
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
+            path: Arc::new(path.to_path_buf()),
         };
         db.migrate()?;
         Ok(db)
@@ -162,6 +164,29 @@ impl Db {
         .context("databastråden kraschade")?
     }
 
+    /// Kör en potentiellt lång läsning på en separat skrivskyddad
+    /// anslutning. WAL låter den läsa en stabil snapshot samtidigt som
+    /// motorn fortsätter skriva via primäranslutningen.
+    pub async fn read_call<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let path = Arc::clone(&self.path);
+        tokio::task::spawn_blocking(move || {
+            let conn = Connection::open_with_flags(
+                path.as_ref(),
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .with_context(|| format!("kunde inte öppna läsanslutning till {}", path.display()))?;
+            conn.busy_timeout(std::time::Duration::from_secs(5))?;
+            conn.pragma_update(None, "query_only", true)?;
+            f(&conn)
+        })
+        .await
+        .context("databasens lästråd kraschade")?
+    }
+
     /// Enkel hälsokontroll. Verifierar att anslutningen svarar.
     pub async fn ping(&self) -> Result<()> {
         self.call(|conn| {
@@ -210,6 +235,52 @@ mod migration_tests {
             .unwrap();
         assert_eq!(version, 0);
         assert_eq!(added, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lang_lasning_blockerar_inte_primaranslutningen() {
+        use std::sync::mpsc;
+
+        let path = std::env::temp_dir().join(format!(
+            "netfyr-read-connection-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&path).unwrap();
+        let reader = db.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let task = tokio::spawn(async move {
+            reader
+                .read_call(move |_| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            db.call(|conn| {
+                conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))?;
+                Ok(())
+            }),
+        )
+        .await
+        .expect("primäranslutningen blockerades av läsningen")
+        .unwrap();
+
+        release_tx.send(()).unwrap();
+        task.await.unwrap();
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

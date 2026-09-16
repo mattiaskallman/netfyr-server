@@ -25,8 +25,10 @@
 
 pub mod display;
 pub mod flap;
+pub mod history;
 pub mod monitor;
 pub mod ping;
+pub mod polls;
 pub mod probe;
 pub mod repo;
 pub mod slow;

@@ -13,7 +13,7 @@ setting_up_container
 network_check
 update_os
 
-NETFYR_SCRIPT_REF="v1.2.3"
+NETFYR_SCRIPT_REF="v1.2.4"
 NETFYR_RELEASE_FUNC_SHA256="cd553e32cddb5c69c4121d4528d9aeb99fafae1d504d49773b330735c06910bd"
 
 msg_info "Installing dependencies"
