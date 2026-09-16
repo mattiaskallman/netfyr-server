@@ -24,7 +24,6 @@ use serde::Serialize;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -42,32 +41,51 @@ struct CachedStats {
     value: StatsView,
 }
 
-static CACHE: OnceLock<Mutex<HashMap<String, CachedStats>>> = OnceLock::new();
-static CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
+#[derive(Default)]
+struct StatsCache {
+    generation: u64,
+    entries: HashMap<String, CachedStats>,
+}
 
-fn cache() -> &'static Mutex<HashMap<String, CachedStats>> {
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+static CACHE: OnceLock<Mutex<StatsCache>> = OnceLock::new();
+
+fn cache() -> &'static Mutex<StatsCache> {
+    CACHE.get_or_init(|| Mutex::new(StatsCache::default()))
 }
 
 fn cached(window: &str) -> Option<StatsView> {
     let mut guard = cache().lock().unwrap_or_else(|e| e.into_inner());
-    guard.retain(|_, item| item.created.elapsed() < CACHE_TTL);
-    guard.get(window).map(|item| item.value.clone())
+    guard
+        .entries
+        .retain(|_, item| item.created.elapsed() < CACHE_TTL);
+    guard.entries.get(window).map(|item| item.value.clone())
 }
 
-fn cache_put(window: String, value: StatsView) {
-    cache().lock().unwrap_or_else(|e| e.into_inner()).insert(
+fn cache_generation() -> u64 {
+    cache().lock().unwrap_or_else(|e| e.into_inner()).generation
+}
+
+/// Kontroll och insert sker under samma lås. Därmed kan clear() aldrig
+/// hamna mellan generationskontrollen och återfyllningen.
+fn cache_put_if_generation(generation: u64, window: String, value: StatsView) -> bool {
+    let mut guard = cache().lock().unwrap_or_else(|e| e.into_inner());
+    if guard.generation != generation {
+        return false;
+    }
+    guard.entries.insert(
         window,
         CachedStats {
             created: Instant::now(),
             value,
         },
     );
+    true
 }
 
 fn cache_clear() {
-    CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
-    cache().lock().unwrap_or_else(|e| e.into_inner()).clear();
+    let mut guard = cache().lock().unwrap_or_else(|e| e.into_inner());
+    guard.generation = guard.generation.wrapping_add(1);
+    guard.entries.clear();
 }
 
 const KPI_SQL: &str = "SELECT address,
@@ -174,7 +192,9 @@ pub async fn get(
         Some(s) => s,
         None => {
             let lang = crate::i18n::load_db(&state.db).await;
-            return Err(ApiError::bad_request(crate::i18n::unknown_window(lang, &window)));
+            return Err(ApiError::bad_request(crate::i18n::unknown_window(
+                lang, &window,
+            )));
         }
     };
     let now = super::now_ms();
@@ -189,16 +209,14 @@ pub async fn get(
         .read_call(move |conn| {
             // read_call serialiserar cache-missar. Kontrollera igen efter
             // grinden så samtidiga anrop delar samma byggjobb.
-            let generation = CACHE_GENERATION.load(Ordering::Acquire);
+            let generation = cache_generation();
             if let Some(out) = cached(&window) {
                 return Ok(out);
             }
             let out = build(conn, &window, from, now)?;
             // En historikradering kan ha skett medan snapshoten byggdes.
             // Lägg aldrig tillbaka data från en äldre generation.
-            if CACHE_GENERATION.load(Ordering::Acquire) == generation {
-                cache_put(window, out.clone());
-            }
+            cache_put_if_generation(generation, window, out.clone());
             Ok(out)
         })
         .await?;
@@ -233,8 +251,9 @@ fn build(conn: &Connection, window: &str, from: i64, to: i64) -> anyhow::Result<
     let mut p95: HashMap<String, f64> = HashMap::new();
     {
         let mut stmt = conn.prepare(P95_SQL)?;
-        let rows = stmt
-            .query_map([from], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))?;
+        let rows = stmt.query_map([from], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+        })?;
         for row in rows {
             let (addr, ms) = row?;
             p95.insert(addr, ms);
@@ -382,7 +401,10 @@ pub async fn clear(
         &actor.username,
         "stats_clear",
         None,
-        Some(&crate::i18n::cleared_detail(crate::i18n::load_db(&state.db).await, removed)),
+        Some(&crate::i18n::cleared_detail(
+            crate::i18n::load_db(&state.db).await,
+            removed,
+        )),
         Some(&addr.ip().to_string()),
     )
     .await;
@@ -427,20 +449,44 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cache_clear_tar_bort_tidigare_statistik() {
-        cache_clear();
-        let value = StatsView {
+    fn empty_stats() -> StatsView {
+        StatsView {
             window: "24h".to_string(),
             from: 1,
             to: 2,
             total_samples: 0,
             rows: Vec::new(),
             incidents: Vec::new(),
-        };
-        cache_put("24h".to_string(), value);
+        }
+    }
+
+    #[test]
+    fn cache_clear_tar_bort_tidigare_statistik() {
+        cache_clear();
+        let generation = cache_generation();
+        assert!(cache_put_if_generation(
+            generation,
+            "24h".to_string(),
+            empty_stats()
+        ));
         assert!(cached("24h").is_some());
         cache_clear();
+        assert!(cached("24h").is_none());
+    }
+
+    #[test]
+    fn gammal_snapshot_kan_inte_aterfylla_cache_efter_clear() {
+        cache_clear();
+        let stale_generation = cache_generation();
+
+        // Deterministiskt interleaving: snapshoten startar, clear sker,
+        // därefter försöker snapshoten återfylla cachen.
+        cache_clear();
+        assert!(!cache_put_if_generation(
+            stale_generation,
+            "24h".to_string(),
+            empty_stats()
+        ));
         assert!(cached("24h").is_none());
     }
 }
