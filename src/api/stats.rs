@@ -461,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_clear_tar_bort_tidigare_statistik() {
+    fn cache_clear_invaliderar_bade_befintlig_cache_och_pagaende_snapshot() {
         cache_clear();
         let generation = cache_generation();
         assert!(cache_put_if_generation(
@@ -470,18 +470,12 @@ mod tests {
             empty_stats()
         ));
         assert!(cached("24h").is_some());
+
+        // Deterministiskt interleaving i samma test: snapshoten startar,
+        // clear sker, därefter försöker snapshoten återfylla cachen.
+        let stale_generation = cache_generation();
         cache_clear();
         assert!(cached("24h").is_none());
-    }
-
-    #[test]
-    fn gammal_snapshot_kan_inte_aterfylla_cache_efter_clear() {
-        cache_clear();
-        let stale_generation = cache_generation();
-
-        // Deterministiskt interleaving: snapshoten startar, clear sker,
-        // därefter försöker snapshoten återfylla cachen.
-        cache_clear();
         assert!(!cache_put_if_generation(
             stale_generation,
             "24h".to_string(),
